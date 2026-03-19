@@ -1,0 +1,59 @@
+#!/usr/bin/env python3
+"""Route tasks to specialist agents via HTTP POST."""
+
+import json
+import sys
+import urllib.error
+import urllib.request
+
+AGENTS = {
+    "canopy": "http://127.0.0.1:18793/ask",
+    "tap": "http://127.0.0.1:18792/ask",
+    "briar": "http://127.0.0.1:18794/ask",
+    "forge": "http://127.0.0.1:18795/ask",
+    "spring": "http://127.0.0.1:18796/ask",
+}
+
+TIMEOUT = 300
+
+
+def main():
+    if len(sys.argv) < 3:
+        print(f"Usage: hail <agent> <task>")
+        print(f"Agents: {', '.join(AGENTS)}")
+        sys.exit(1)
+
+    agent = sys.argv[1].lower()
+    task = " ".join(sys.argv[2:])
+
+    if agent not in AGENTS:
+        print(f"Unknown agent: {agent}")
+        print(f"Available: {', '.join(AGENTS)}")
+        sys.exit(1)
+
+    url = AGENTS[agent]
+    CHAT_IDS = {
+        "canopy": "canopy_main",
+        "tap": "tap_main",
+        "briar": "briar_main",
+        "forge": "forge_main",
+        "spring": "spring_main",
+    }
+    chat_id = CHAT_IDS.get(agent, f"{agent}_main")
+    payload = json.dumps({"message": task, "chat_id": chat_id}).encode()
+    req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
+
+    try:
+        with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
+            data = json.loads(resp.read().decode())
+            print(data.get("response", json.dumps(data, indent=2)))
+    except urllib.error.URLError as e:
+        print(f"Error connecting to {agent} at {url}: {e}", file=sys.stderr)
+        sys.exit(1)
+    except TimeoutError:
+        print(f"Timeout after {TIMEOUT}s waiting for {agent}", file=sys.stderr)
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

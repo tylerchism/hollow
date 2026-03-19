@@ -1,0 +1,136 @@
+#!/usr/bin/env python3
+"""Mission Control CLI — manage tasks, ideas, and activity logs."""
+
+import json
+import os
+import sys
+import urllib.error
+import urllib.parse
+import urllib.request
+
+BASE_URL = os.environ.get("MC_BASE_URL", "http://localhost:3333")
+API_KEY = os.environ.get("MC_API_KEY", "462f220e3c3f15324825a86373da874f92302bf6fc646e3330731468cc959c22")
+
+
+def api(method, path, data=None, params=None):
+    url = f"{BASE_URL}{path}"
+    if params:
+        url += "?" + urllib.parse.urlencode(params)
+    body = json.dumps(data).encode() if data else None
+    req = urllib.request.Request(url, data=body, method=method)
+    req.add_header("Content-Type", "application/json")
+    req.add_header("x-api-key", API_KEY)
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            return json.loads(resp.read().decode())
+    except urllib.error.HTTPError as e:
+        body = e.read().decode() if e.fp else ""
+        print(f"HTTP {e.code}: {body}", file=sys.stderr)
+        sys.exit(1)
+    except urllib.error.URLError as e:
+        print(f"Connection error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+
+def parse_flags(args):
+    flags = {}
+    positional = []
+    for arg in args:
+        if arg.startswith("--"):
+            if "=" in arg:
+                k, v = arg[2:].split("=", 1)
+                flags[k] = v
+            else:
+                flags[arg[2:]] = True
+        else:
+            positional.append(arg)
+    return positional, flags
+
+
+def main():
+    if len(sys.argv) < 3:
+        print("Usage: mc <resource> <operation> [args]")
+        print("  mc tasks list [--status=<status>]")
+        print("  mc tasks create \"<title>\" [--description=\"...\"] [--priority=high|medium|low] [--tags=\"t1,t2\"]")
+        print("  mc tasks update <id> --status=<status> [--blocked-reason=\"...\"]")
+        print("  mc ideas list")
+        print("  mc ideas create \"<title>\" [--body=\"...\"] [--type=idea|spike]")
+        print("  mc activity log \"<action>\" [--details=\"...\"]")
+        sys.exit(1)
+
+    resource = sys.argv[1]
+    operation = sys.argv[2]
+    rest = sys.argv[3:]
+    positional, flags = parse_flags(rest)
+
+    if resource == "tasks":
+        if operation == "list":
+            params = {}
+            if "status" in flags:
+                params["status"] = flags["status"]
+            result = api("GET", "/api/tasks", params=params)
+        elif operation == "create":
+            if not positional:
+                print("Error: title required", file=sys.stderr)
+                sys.exit(1)
+            body = {"title": positional[0]}
+            if "description" in flags:
+                body["description"] = flags["description"]
+            if "priority" in flags:
+                body["priority"] = flags["priority"]
+            if "tags" in flags:
+                body["tags"] = [t.strip() for t in flags["tags"].split(",")]
+            result = api("POST", "/api/tasks", data=body)
+        elif operation == "update":
+            if not positional:
+                print("Error: task id required", file=sys.stderr)
+                sys.exit(1)
+            task_id = positional[0]
+            body = {}
+            if "status" in flags:
+                body["status"] = flags["status"]
+            if "blocked-reason" in flags:
+                body["blocked_reason"] = flags["blocked-reason"]
+            result = api("PATCH", f"/api/tasks/{task_id}", data=body)
+        else:
+            print(f"Unknown tasks operation: {operation}", file=sys.stderr)
+            sys.exit(1)
+
+    elif resource == "ideas":
+        if operation == "list":
+            result = api("GET", "/api/ideas")
+        elif operation == "create":
+            if not positional:
+                print("Error: title required", file=sys.stderr)
+                sys.exit(1)
+            body = {"title": positional[0]}
+            if "body" in flags:
+                body["body"] = flags["body"]
+            if "type" in flags:
+                body["type"] = flags["type"]
+            result = api("POST", "/api/ideas", data=body)
+        else:
+            print(f"Unknown ideas operation: {operation}", file=sys.stderr)
+            sys.exit(1)
+
+    elif resource == "activity":
+        if operation == "log":
+            if not positional:
+                print("Error: action required", file=sys.stderr)
+                sys.exit(1)
+            body = {"agent": "tarn", "action_type": positional[0]}
+            if "details" in flags:
+                body["details"] = flags["details"]
+            result = api("POST", "/api/agent-activity", data=body)
+        else:
+            print(f"Unknown activity operation: {operation}", file=sys.stderr)
+            sys.exit(1)
+    else:
+        print(f"Unknown resource: {resource}", file=sys.stderr)
+        sys.exit(1)
+
+    print(json.dumps(result, indent=2))
+
+
+if __name__ == "__main__":
+    main()
