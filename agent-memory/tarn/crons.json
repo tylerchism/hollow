@@ -1,0 +1,11 @@
+[
+  {
+    "name": "test_cron",
+    "schedule": "* * * * *",
+    "tz": "America/Chicago",
+    "prompt": "This is a test cron. Respond with exactly: CRON_TEST_OK",
+    "is_main_session": false,
+    "notify_telegram": false,
+    "chat_id": "cron_test"
+  }
+]

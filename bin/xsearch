@@ -1,0 +1,66 @@
+#!/usr/bin/env python3
+"""Web/social search via xAI/Grok API (built-in web_search tool)."""
+
+import json
+import os
+import sys
+import urllib.error
+import urllib.request
+
+API_KEY = os.environ.get("XAI_API_KEY", "")
+ENDPOINT = "https://api.x.ai/v1/responses"
+
+
+def main():
+    if len(sys.argv) < 2:
+        print("Usage: xsearch \"<query>\" [--count=5]")
+        sys.exit(1)
+
+    query = sys.argv[1]
+    count = 5
+    for arg in sys.argv[2:]:
+        if arg.startswith("--count="):
+            count = int(arg.split("=", 1)[1])
+
+    payload = json.dumps({
+        "model": "grok-4-1-fast",
+        "input": [
+            {"role": "system", "content": f"Search the web and return the top {count} results with sources. Be concise and factual."},
+            {"role": "user", "content": query},
+        ],
+        "tools": [{"type": "web_search"}],
+    }).encode()
+
+    req = urllib.request.Request(ENDPOINT, data=payload)
+    req.add_header("Content-Type", "application/json")
+    req.add_header("Authorization", f"Bearer {API_KEY}")
+    req.add_header("User-Agent", "hollow-xsearch/1.0")
+
+    try:
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            data = json.loads(resp.read().decode())
+            output = data.get("output", [])
+            for item in output:
+                if item.get("type") == "message":
+                    for content in item.get("content", []):
+                        if content.get("type") == "output_text":
+                            print(content.get("text", ""))
+                            annotations = content.get("annotations", [])
+                            if annotations:
+                                print("\n--- Sources ---")
+                                for a in annotations:
+                                    if a.get("type") == "url_citation":
+                                        print(f"  {a.get('title', 'Untitled')}: {a.get('url', '')}")
+            if not output:
+                print(json.dumps(data, indent=2))
+    except urllib.error.HTTPError as e:
+        body = e.read().decode() if e.fp else ""
+        print(f"API error {e.code}: {body}", file=sys.stderr)
+        sys.exit(1)
+    except urllib.error.URLError as e:
+        print(f"Connection error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
