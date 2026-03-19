@@ -4,36 +4,66 @@ Hollow is a multi-agent AI orchestration system where adversarial review is a fi
 
 ## System Requirements
 
+**Hardware:**
+
+- **RAM:** 8GB minimum, 16GB comfortable. Running 5+ Claude agents concurrently needs headroom.
+- **CPU:** No GPU required. Ollama (local embeddings) runs fine on CPU, just slower on larger models.
+- **Storage:** ~500MB for Python deps + ~275MB for the Ollama embedding model if used.
+- **OS:** Linux or macOS. (Windows via WSL2 should work but is untested.)
+- **Internet:** Required — all agents call the Claude API for every response.
+
 **Required:**
 
 - **Claude MAX subscription** — Hollow uses the `claude` CLI via the Claude Code SDK, not a bare API key. A standard API key is not sufficient. You must have Claude MAX.
-- **`claude` CLI installed and authenticated** — Install from [claude.ai/code](https://claude.ai/code) and run `claude` once to authenticate before starting Hollow.
-- **Python 3.9+** — (3.11+ recommended; matches pyproject.toml)
-- **`uv`** — Python package manager. Install: `curl -LsSf https://astral.sh/uv/install.sh | sh`
+- **`claude` CLI installed and authenticated** — Install from [claude.ai/code](https://claude.ai/code) and run `claude` once to authenticate before running Hollow.
+- **Python 3.11+**
 - **`git`**
 
-**Optional:**
+**Auto-installed by `install.sh`:**
 
-- **`gh` CLI** — For GitHub repo operations from inside agents. Install: `brew install gh` or [cli.github.com](https://cli.github.com).
-- **Tailscale** — For remote access to the local agent network from mobile or other machines.
-- **Telegram bot token** — For Telegram notifications and mobile access. Create via [@BotFather](https://t.me/BotFather).
-- **xAI API key** — For Grok/X search via the `xsearch` tool (real-time web, X/Twitter). Get at [console.x.ai](https://console.x.ai).
+- **`uv`** — Python package manager
+- **`gh` CLI** — GitHub repo operations from inside agents
+- **Ollama** — Local vector embeddings (optional; falls back to keyword-only memory if skipped)
+- **`nomic-embed-text`** — Ollama embedding model (~275MB, optional)
+- **All Python dependencies** from `pyproject.toml`
+
+**Optional (prompted during setup):**
+
+- **Telegram bot token** — For notifications and mobile access. Create via [@BotFather](https://t.me/BotFather).
+- **xAI API key** — For Grok/X search via the `xsearch` tool. Get at [console.x.ai](https://console.x.ai).
+
+## Memory: Embeddings
+
+Hollow uses a hybrid vector + keyword memory system backed by SQLite:
+
+- **With Ollama** — `nomic-embed-text` runs locally, no external API needed. Semantic search weighted 70%, keyword 30%. Runs on CPU (no GPU required).
+- **With Voyage API** — Cloud-based embeddings if you have a Voyage key. Set `VOYAGE_API_KEY` in `.env`.
+- **Neither configured** — Falls back to keyword-only (FTS5). Still functional for most use cases.
+
+The linear vector scan works well up to ~50K memory chunks. At that scale and beyond, a proper index would help — but you'd have to accumulate months of heavy usage to get there.
 
 ## Installation
 
 ```bash
-git clone <your-hollow-repo-url>
+git clone https://github.com/tylerchism/hollow
 cd hollow
-python setup.py
-./start.sh
+./install.sh
 ```
 
-`setup.py` is interactive. It will:
+`install.sh` handles everything: installs `uv`, `gh`, Ollama (optional), pulls the embedding model, installs Python dependencies, then launches the interactive setup wizard.
+
+The setup wizard will:
 - Ask for your name, timezone, and team configuration
 - Scan for available ports automatically (no hardcoded ports)
 - Prompt for API keys (masked display, never overwrites without confirmation)
 - Generate `hollow.config.json`, `.env`, agent memory directories, identity files, `bin/hail`, and `start.sh`
 - Skip existing agent memory directories to preserve conversation history (idempotent — safe to re-run)
+
+After setup:
+
+```bash
+./start.sh
+```
 
 ## Default Team Structure
 
