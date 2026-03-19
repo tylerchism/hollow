@@ -1,47 +1,71 @@
 #!/usr/bin/env python3
-"""Route tasks to specialist agents via HTTP POST."""
+"""Route tasks to specialist agents via HTTP POST.
+
+Reads agent list and ports from hollow.config.json at runtime.
+Run 'python setup.py' to generate hollow.config.json.
+"""
+
+from __future__ import annotations
 
 import json
 import sys
 import urllib.error
 import urllib.request
+from pathlib import Path
 
-AGENTS = {
-    "canopy": "http://127.0.0.1:18793/ask",
-    "tap": "http://127.0.0.1:18792/ask",
-    "briar": "http://127.0.0.1:18794/ask",
-    "forge": "http://127.0.0.1:18795/ask",
-    "spring": "http://127.0.0.1:18796/ask",
-}
-
+HOLLOW_ROOT = Path(__file__).parent.parent.resolve()
+CONFIG_PATH = HOLLOW_ROOT / "hollow.config.json"
 TIMEOUT = 300
 
 
+def load_agents() -> dict[str, str]:
+    """Load agent name -> URL mapping from hollow.config.json."""
+    if not CONFIG_PATH.exists():
+        print(
+            f"Error: hollow.config.json not found at {CONFIG_PATH}\n"
+            "Run 'python setup.py' to generate it.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    try:
+        cfg = json.loads(CONFIG_PATH.read_text())
+    except (json.JSONDecodeError, OSError) as e:
+        print(f"Error: could not parse hollow.config.json: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    agents = {}
+    for agent in cfg.get("agents", []):
+        keyword = agent.get("hail_keyword", agent.get("name", ""))
+        port = agent.get("port")
+        if keyword and port:
+            agents[keyword.lower()] = f"http://127.0.0.1:{port}/ask"
+
+    return agents
+
+
 def main():
+    agents = load_agents()
+
     if len(sys.argv) < 3:
-        print(f"Usage: hail <agent> <task>")
-        print(f"Agents: {', '.join(AGENTS)}")
+        print("Usage: hail <agent> <task>")
+        print(f"Agents: {', '.join(sorted(agents))}")
         sys.exit(1)
 
     agent = sys.argv[1].lower()
     task = " ".join(sys.argv[2:])
 
-    if agent not in AGENTS:
+    if agent not in agents:
         print(f"Unknown agent: {agent}")
-        print(f"Available: {', '.join(AGENTS)}")
+        print(f"Available: {', '.join(sorted(agents))}")
         sys.exit(1)
 
-    url = AGENTS[agent]
-    CHAT_IDS = {
-        "canopy": "canopy_main",
-        "tap": "tap_main",
-        "briar": "briar_main",
-        "forge": "forge_main",
-        "spring": "spring_main",
-    }
-    chat_id = CHAT_IDS.get(agent, f"{agent}_main")
+    url = agents[agent]
+    chat_id = f"{agent}_main"
     payload = json.dumps({"message": task, "chat_id": chat_id}).encode()
-    req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
+    req = urllib.request.Request(
+        url, data=payload, headers={"Content-Type": "application/json"}
+    )
 
     try:
         with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:

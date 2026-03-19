@@ -1,0 +1,49 @@
+{
+  "version": "v1",
+  "coordinator": {
+    "name": "tarn",
+    "port": 18800,
+    "description": "Coordinator — primary user interface, routes tasks to specialist agents"
+  },
+  "agents": [
+    {
+      "name": "tap",
+      "port": 18792,
+      "role": "Deep research, empirical depth, citations, narrow analytical rigor",
+      "description": "Finds out what is actually true. Primary sources, specific studies, real numbers. Distinguishes weak evidence from strong evidence. Flags when a claim is contested or when data is thin.",
+      "hail_keyword": "tap"
+    },
+    {
+      "name": "canopy",
+      "port": 18793,
+      "role": "Cross-domain synthesis, strategic framing, connecting dots",
+      "description": "Finds connections across domains. Draws from the breadth of human knowledge to find the angle that matters — not the obvious one. Brings the parallel they haven't seen, the question that reframes the whole thing.",
+      "hail_keyword": "canopy"
+    },
+    {
+      "name": "briar",
+      "port": 18794,
+      "role": "Adversarial review, risk analysis, stress-testing plans",
+      "description": "Finds failure modes before they happen. Identifies the specific conditions under which plans fail, the missing assumptions, the scope traps, the risks that aren't on the radar.",
+      "hail_keyword": "briar"
+    },
+    {
+      "name": "forge",
+      "port": 18795,
+      "role": "Project lead, builder, scope discipline, GitHub-native",
+      "description": "Scopes and sequences work. Breaks projects into concrete steps, identifies dependencies, flags scope risks, and produces actionable plans. Owns the build plan.",
+      "hail_keyword": "forge"
+    },
+    {
+      "name": "spring",
+      "port": 18796,
+      "role": "Creative writing, content, voice-driven output",
+      "description": "Makes things worth reading. Articles, summaries, social posts, scripts — anything where voice and craft matter. Brings genuine perspective to content.",
+      "hail_keyword": "spring"
+    }
+  ],
+  "user": {
+    "name": "Tyler",
+    "timezone": "America/Chicago"
+  }
+}
