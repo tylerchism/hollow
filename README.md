@@ -32,6 +32,24 @@ Hollow is a multi-agent AI orchestration system where adversarial review is a fi
 - **Telegram bot token** — For notifications and mobile access. Create via [@BotFather](https://t.me/BotFather).
 - **xAI API key** — For Grok/X search via the `xsearch` tool. Get at [console.x.ai](https://console.x.ai).
 
+## Models
+
+**Primary model (all agents):** `claude-sonnet-4-6`
+
+Every agent in the team runs on the same model by default. This is set via `PRIMARY_MODEL` in your `.env` and is configurable during setup. Options:
+
+| Model | Notes |
+|-------|-------|
+| `claude-sonnet-4-6` | Default — strong balance of speed and capability |
+| `claude-opus-4-5` | More capable, significantly slower and more expensive |
+| `claude-haiku-4-5` | Fast and cheap, less capable — fine for lightweight agents |
+
+**Context summarization:** `claude-haiku-4-5` — hardcoded, not user-configurable. When an agent's conversation history exceeds the budget, old turns are summarized in the background using Haiku to keep costs low. This is always Haiku regardless of your primary model setting.
+
+**Embedding model:** `nomic-embed-text` via Ollama — configurable via `OLLAMA_EMBED_MODEL` in `.env`. See the Memory section below.
+
+To change the primary model after setup, edit `PRIMARY_MODEL` in `.env` and restart.
+
 ## Memory: Embeddings
 
 Hollow uses a hybrid vector + keyword memory system backed by SQLite:
