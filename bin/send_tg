@@ -1,0 +1,71 @@
+#!/usr/bin/env bash
+# send_tg — Send an interim Telegram message during a long-running task.
+#
+# Usage: send_tg "message text"
+#
+# Reads TELEGRAM_BOT_TOKEN from agents/tarn/.env
+# Reads active chat_id from /tmp/tarn_active_chat_id (written by telegram.py on each inbound message)
+#
+# Call this BEFORE starting slow work so Tyler gets a heads-up:
+#   send_tg "on it, checking with the team..."
+#   hail canopy "..."
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+HOLLOW_ROOT="$(dirname "$SCRIPT_DIR")"
+TARN_ENV="$HOLLOW_ROOT/agents/tarn/.env"
+ACTIVE_CHAT_FILE="/tmp/tarn_active_chat_id"
+
+if [[ $# -lt 1 ]]; then
+    echo "Usage: send_tg \"message text\"" >&2
+    exit 1
+fi
+
+MESSAGE="$*"
+
+# Load TELEGRAM_BOT_TOKEN from tarn's .env
+if [[ ! -f "$TARN_ENV" ]]; then
+    echo "send_tg: tarn .env not found at $TARN_ENV" >&2
+    exit 1
+fi
+
+TOKEN=""
+while IFS= read -r line || [[ -n "$line" ]]; do
+    # Strip leading/trailing whitespace and skip comments
+    line="${line#"${line%%[![:space:]]*}"}"
+    [[ "$line" =~ ^# ]] && continue
+    [[ "$line" =~ ^TELEGRAM_BOT_TOKEN=(.+)$ ]] && TOKEN="${BASH_REMATCH[1]}" && break
+done < "$TARN_ENV"
+
+if [[ -z "$TOKEN" ]]; then
+    echo "send_tg: TELEGRAM_BOT_TOKEN not found in $TARN_ENV" >&2
+    exit 1
+fi
+
+# Read active chat_id
+if [[ ! -f "$ACTIVE_CHAT_FILE" ]]; then
+    echo "send_tg: no active chat (no inbound message received yet)" >&2
+    exit 1
+fi
+
+CHAT_ID="$(cat "$ACTIVE_CHAT_FILE")"
+if [[ -z "$CHAT_ID" ]]; then
+    echo "send_tg: active chat_id is empty" >&2
+    exit 1
+fi
+
+# Send via Telegram Bot API
+RESPONSE="$(curl -s -X POST \
+    "https://api.telegram.org/bot${TOKEN}/sendMessage" \
+    -H "Content-Type: application/json" \
+    -d "{\"chat_id\": ${CHAT_ID}, \"text\": $(python3 -c "import json,sys; print(json.dumps(sys.argv[1]))" "$MESSAGE")}")"
+
+OK="$(echo "$RESPONSE" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('ok','false'))" 2>/dev/null || echo "false")"
+
+if [[ "$OK" != "True" ]] && [[ "$OK" != "true" ]]; then
+    echo "send_tg: Telegram API error: $RESPONSE" >&2
+    exit 1
+fi
+
+exit 0

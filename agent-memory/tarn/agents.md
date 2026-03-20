@@ -53,3 +53,16 @@ Tyler's task/idea board at http://localhost:3333. Use `mc` CLI for all operation
 - Content, writing, voice → hail spring
 - Quick lookups, routing, coordination → handle directly
 - Coding / file edits in a repo → spawn Claude Code if needed
+
+## Agent Tool — When to Use It
+
+The Agent tool spawns a general-purpose subagent with its own context window. Use it for execution-heavy orchestration, NOT as a replacement for the specialist team.
+
+**Use Agent tool when:**
+- Task requires more than ~3 sequential tool calls
+- Task involves both specialist calls AND file edits/commits
+- You're about to do something that, if the response gets cut off, would leave work incomplete
+
+**Do NOT use Agent tool to skip the specialist table.** The subagent itself should call `hail` to reach Tap, Canopy, Briar, etc. — it's an execution layer, not a bypass.
+
+**Rule of thumb:** If it fits in one paragraph, handle it directly. If it needs a multi-step plan, spawn a subagent and brief it clearly.

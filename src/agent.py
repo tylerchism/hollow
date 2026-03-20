@@ -55,7 +55,7 @@ if TYPE_CHECKING:
 log = logging.getLogger(__name__)
 
 MAX_TOOL_ROUNDS = 25
-NATIVE_TOOLS = ["Bash", "Read", "Write", "Edit", "Glob", "Grep"]
+NATIVE_TOOLS = ["Bash", "Read", "Write", "Edit", "Glob", "Grep", "Agent", "WebSearch", "WebFetch"]
 HISTORY_CHAR_BUDGET = 500_000
 
 # SQL for chat_sessions table
