@@ -6,6 +6,7 @@ import os
 import time
 from typing import Callable
 
+import aiosqlite
 import httpx
 from telegram import Update
 from telegram.error import Conflict, NetworkError, TelegramError
@@ -22,9 +23,21 @@ from src.config import Config
 
 log = logging.getLogger(__name__)
 
-# How old (seconds) a pending update must be before we skip it on restart.
-# Messages within this window will still be processed even after a restart.
-PENDING_UPDATE_AGE_CUTOFF_SECS = 120
+# How long (seconds) to keep a completed update_id in the dedup cache before
+# evicting it.  Re-delivered updates that arrive within this window are silently
+# dropped; after the window expires the entry is removed to keep memory bounded.
+DEDUP_TTL_SECS = 300  # 5 minutes
+
+# DDL for the offset-persistence table (added to hollow.db at startup).
+_OFFSET_DDL = """
+CREATE TABLE IF NOT EXISTS telegram_offset (
+    id   INTEGER PRIMARY KEY CHECK (id = 1),
+    last_update_id INTEGER NOT NULL DEFAULT 0,
+    updated_at     REAL    NOT NULL DEFAULT 0
+);
+INSERT OR IGNORE INTO telegram_offset (id, last_update_id, updated_at)
+VALUES (1, 0, 0);
+"""
 
 
 async def verify_token_exclusive(token: str) -> tuple[bool, str]:
@@ -111,6 +124,108 @@ class MessageQueue:
         self._queues.clear()
 
 
+class UpdateOffsetStore:
+    """
+    SQLite-backed store for the Telegram getUpdates offset watermark.
+
+    Implements the OpenClaw in-flight watermark pattern:
+    - pending_update_ids: set of update IDs currently being processed
+    - highest_completed_update_id: the highest update_id we have fully processed
+    - persisted offset = min(pending_update_ids) - 1  (or highest_completed if no pending)
+
+    This ensures that if update 6 is slow and update 7 finishes first, we persist
+    offset=5 so that both 6 and 7 are re-delivered on restart (safe re-delivery),
+    rather than skipping 6.  The 5-minute TTL dedup cache prevents re-delivered
+    updates from being processed twice.
+    """
+
+    def __init__(self, db_path: str) -> None:
+        self.db_path = db_path
+        self._db: aiosqlite.Connection | None = None
+        self._lock = asyncio.Lock()
+
+        # In-flight watermark state
+        self._pending_update_ids: set[int] = set()
+        self._highest_completed_update_id: int = 0
+
+        # TTL dedup cache: update_id -> completed_at timestamp
+        self._dedup_cache: dict[int, float] = {}
+
+    async def initialize(self) -> None:
+        """Open DB and create the offset table if needed."""
+        self._db = await aiosqlite.connect(self.db_path)
+        await self._db.execute("PRAGMA journal_mode=WAL")
+        await self._db.executescript(_OFFSET_DDL)
+        await self._db.commit()
+        # Seed in-memory watermark from DB
+        self._highest_completed_update_id = await self._read_persisted_offset()
+
+    async def _read_persisted_offset(self) -> int:
+        cursor = await self._db.execute(
+            "SELECT last_update_id FROM telegram_offset WHERE id = 1"
+        )
+        row = await cursor.fetchone()
+        return row[0] if row else 0
+
+    async def get_startup_offset(self) -> int:
+        """Return the offset to pass to getUpdates on startup (last_update_id)."""
+        return await self._read_persisted_offset()
+
+    def mark_in_flight(self, update_id: int) -> None:
+        """Register that we are starting to process an update."""
+        self._pending_update_ids.add(update_id)
+
+    def is_duplicate(self, update_id: int) -> bool:
+        """
+        Return True if this update_id was already completed recently (within TTL).
+        Also prunes stale dedup entries.
+        """
+        now = time.time()
+        # Prune expired entries
+        expired = [uid for uid, ts in self._dedup_cache.items() if now - ts > DEDUP_TTL_SECS]
+        for uid in expired:
+            del self._dedup_cache[uid]
+        return update_id in self._dedup_cache
+
+    async def mark_completed(self, update_id: int) -> None:
+        """
+        Register that we finished processing an update, then persist the safe offset.
+        """
+        async with self._lock:
+            self._pending_update_ids.discard(update_id)
+            self._dedup_cache[update_id] = time.time()
+            if update_id > self._highest_completed_update_id:
+                self._highest_completed_update_id = update_id
+            await self._persist_safe_offset()
+
+    async def _persist_safe_offset(self) -> None:
+        """
+        Compute and write the safe watermark:
+          - If there are in-flight updates, persist min(pending) - 1
+          - Otherwise persist highest_completed
+        """
+        if self._pending_update_ids:
+            safe_offset = min(self._pending_update_ids) - 1
+        else:
+            safe_offset = self._highest_completed_update_id
+
+        await self._db.execute(
+            "UPDATE telegram_offset SET last_update_id = ?, updated_at = ? WHERE id = 1",
+            (safe_offset, time.time()),
+        )
+        await self._db.commit()
+        log.debug(
+            "Persisted Telegram offset=%d (pending=%s, highest_completed=%d)",
+            safe_offset,
+            self._pending_update_ids,
+            self._highest_completed_update_id,
+        )
+
+    async def close(self) -> None:
+        if self._db:
+            await self._db.close()
+
+
 class TelegramBot:
     """Telegram bot that routes messages through MessageQueue to AgentRunner."""
 
@@ -121,6 +236,9 @@ class TelegramBot:
         self.app: Application | None = None
         self._queue = MessageQueue()
         self._start_time: float = time.time()
+        self._offset_store = UpdateOffsetStore(
+            str(config.data_dir / "hollow.db")
+        )
 
     async def start(self) -> None:
         """Build the application and start polling."""
@@ -132,6 +250,11 @@ class TelegramBot:
         if not ok:
             log.error("Telegram startup aborted: %s", err)
             raise RuntimeError(f"Telegram token error: {err}")
+
+        # Initialize offset store (reads persisted offset from DB)
+        await self._offset_store.initialize()
+        startup_offset = await self._offset_store.get_startup_offset()
+        log.info("Telegram startup offset from DB: %d", startup_offset)
 
         self.app = Application.builder().token(self.config.telegram_bot_token).build()
 
@@ -146,10 +269,15 @@ class TelegramBot:
         await self.app.initialize()
         await self.app.start()
 
-        # Use timestamp-based filtering instead of drop_pending_updates=True.
-        # This means messages sent within the last 2 minutes will still be delivered
-        # after a restart, rather than being silently dropped.
+        # Surface any messages that arrived while we were offline.
+        # We do this before start_polling so we can handle them deliberately.
+        if startup_offset > 0:
+            await self._surface_missed_messages(startup_offset)
+
         self._start_time = time.time()
+
+        # drop_pending_updates=False: we rely on the stored offset for safety,
+        # not on Telegram dropping updates for us.
         await self.app.updater.start_polling(
             drop_pending_updates=False,
             error_callback=self._handle_polling_error,
@@ -168,6 +296,76 @@ class TelegramBot:
         else:
             log.error("Telegram polling error: %s", error)
 
+    async def _surface_missed_messages(self, last_offset: int) -> None:
+        """
+        Fetch updates since last_offset from Telegram.  Any updates whose
+        update_id is greater than last_offset arrived while we were offline.
+        Log them with an offline-window note so the operator can see what was
+        missed; they will be processed normally by the polling loop.
+        """
+        try:
+            # Use a short timeout — this is best-effort at startup
+            async with httpx.AsyncClient(timeout=10) as client:
+                resp = await client.get(
+                    f"https://api.telegram.org/bot{self.config.telegram_bot_token}/getUpdates",
+                    params={"offset": last_offset + 1, "limit": 100, "timeout": 0},
+                )
+                data = resp.json()
+
+            if not data.get("ok"):
+                log.warning("Could not fetch missed updates: %s", data.get("description"))
+                return
+
+            updates = data.get("result", [])
+            if not updates:
+                log.info("No missed messages since last offset %d", last_offset)
+                return
+
+            # Determine the offline window
+            first_update = updates[0]
+            last_update = updates[-1]
+            first_msg = (
+                first_update.get("message") or
+                first_update.get("edited_message") or {}
+            )
+            last_msg = (
+                last_update.get("message") or
+                last_update.get("edited_message") or {}
+            )
+            offline_from = first_msg.get("date")
+            offline_to = last_msg.get("date")
+
+            if offline_from and offline_to:
+                import datetime
+                from_dt = datetime.datetime.utcfromtimestamp(offline_from).strftime("%Y-%m-%d %H:%M:%S UTC")
+                to_dt = datetime.datetime.utcfromtimestamp(offline_to).strftime("%Y-%m-%d %H:%M:%S UTC")
+                log.info(
+                    "I was offline from %s to %s; %d message(s) arrived during that time:",
+                    from_dt,
+                    to_dt,
+                    len(updates),
+                )
+            else:
+                log.info(
+                    "Missed %d update(s) since offset %d (timestamps unavailable):",
+                    len(updates),
+                    last_offset,
+                )
+
+            for upd in updates:
+                msg = upd.get("message") or upd.get("edited_message") or {}
+                sender = (msg.get("from") or {}).get("username", "unknown")
+                text = msg.get("text", "<non-text>")
+                log.info(
+                    "  [offline] update_id=%d from=@%s text=%r",
+                    upd["update_id"],
+                    sender,
+                    text[:200],
+                )
+
+        except Exception:
+            log.exception("Error surfacing missed messages — continuing startup")
+
     async def stop(self) -> None:
         """Graceful shutdown."""
         await self._queue.shutdown()
@@ -175,6 +373,7 @@ class TelegramBot:
             await self.app.updater.stop()
             await self.app.stop()
             await self.app.shutdown()
+        await self._offset_store.close()
 
     async def send_message(self, chat_id: int | str, text: str) -> None:
         """Send a message to a chat (used by cron notifications)."""
@@ -228,22 +427,16 @@ class TelegramBot:
         )
 
     async def _handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        update_id = update.update_id
         user_id = update.effective_user.id
         chat_id = str(update.effective_chat.id)
         is_dm = self._is_dm(update)
         message_text = update.message.text
 
-        # Skip messages that pre-date our startup by more than the cutoff.
-        # This replaces drop_pending_updates=True: we still process recent messages
-        # (e.g. sent while restarting) but drop stale ones from extended downtime.
-        if update.message.date:
-            msg_ts = update.message.date.timestamp()
-            age = self._start_time - msg_ts
-            if age > PENDING_UPDATE_AGE_CUTOFF_SECS:
-                log.info(
-                    "Skipping stale message from %s (%.0fs before startup)", user_id, age
-                )
-                return
+        # Dedup: drop re-delivered updates that were already processed (within TTL)
+        if self._offset_store.is_duplicate(update_id):
+            log.info("Dropping duplicate update_id=%d (already processed, within dedup TTL)", update_id)
+            return
 
         if is_dm and not self._is_allowed(user_id):
             return
@@ -265,6 +458,9 @@ class TelegramBot:
             active_chat_file.write_text(chat_id)
         except Exception:
             pass
+
+        # Register this update as in-flight before enqueuing
+        self._offset_store.mark_in_flight(update_id)
 
         # Build handler and enqueue
         async def process():
@@ -307,5 +503,7 @@ class TelegramBot:
                     await keepalive_task
                 except asyncio.CancelledError:
                     pass
+                # Always mark completed so the watermark advances (even on error)
+                await self._offset_store.mark_completed(update_id)
 
         await self._queue.enqueue(chat_id, process)
