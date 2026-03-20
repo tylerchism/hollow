@@ -792,6 +792,25 @@ def collect_api_keys() -> dict[str, str]:
             elif not required:
                 cprint(f"  Skipping {label}", "dim")
 
+    # Primary model selection
+    current_model = existing_env.get("PRIMARY_MODEL", "claude-sonnet-4-6")
+    cprint("\n  Primary model (used by all agents):", "")
+    cprint("    1) claude-sonnet-4-6  [default — balanced speed + capability]", "dim")
+    cprint("    2) claude-opus-4-5    [more capable, slower + more expensive]", "dim")
+    cprint("    3) claude-haiku-4-5   [fast + cheap, less capable]", "dim")
+    cprint("    4) custom             [enter a model ID manually]", "dim")
+    model_choice = prompt("  Primary model", default=current_model)
+    model_map = {
+        "1": "claude-sonnet-4-6",
+        "2": "claude-opus-4-5",
+        "3": "claude-haiku-4-5",
+    }
+    resolved = model_map.get(model_choice.strip(), model_choice.strip()) or "claude-sonnet-4-6"
+    if model_choice.strip() == "4":
+        resolved = prompt("  Enter model ID", default="claude-sonnet-4-6")
+    env["PRIMARY_MODEL"] = resolved
+    cprint(f"  Set PRIMARY_MODEL={resolved}", "green")
+
     handle_key("ANTHROPIC_API_KEY", "Anthropic API Key")
     handle_key("XAI_API_KEY", "xAI API Key (optional — for Grok/X search)")
     handle_key("TELEGRAM_BOT_TOKEN", "Telegram Bot Token (optional)")
