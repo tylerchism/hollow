@@ -258,6 +258,14 @@ class TelegramBot:
         # Send typing immediately
         await update.effective_chat.send_action("typing")
 
+        # Write active chat_id to a temp file so bin/send_tg can send interim messages mid-turn
+        try:
+            import pathlib, tempfile
+            active_chat_file = pathlib.Path(tempfile.gettempdir()) / "tarn_active_chat_id"
+            active_chat_file.write_text(chat_id)
+        except Exception:
+            pass
+
         # Build handler and enqueue
         async def process():
             # Typing keepalive — refresh every 4 seconds until done
