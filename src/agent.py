@@ -268,9 +268,22 @@ class AgentRunner:
             log.exception("Compaction failed — continuing with original history")
 
     async def reply(
-        self, message: str, chat_id: str, is_main_session: bool = True
+        self,
+        message: str,
+        chat_id: str,
+        is_main_session: bool = True,
+        context_injection: str = "",
     ) -> str:
-        """Process a user message and return the assistant's response."""
+        """Process a user message and return the assistant's response.
+
+        Args:
+            message: The user's message.
+            chat_id: Session identifier (stable per user/agent pair for delegation).
+            is_main_session: Whether to load full memory context (memory.md etc.).
+            context_injection: Optional context from a delegating agent (e.g. Tarn
+                passing conversation background to a sub-agent). Appended to the
+                system prompt inside <delegation_context> tags.
+        """
         # 0. Run compaction if history is too large (before adding new message)
         try:
             await self._compact_history(chat_id)
@@ -284,6 +297,13 @@ class AgentRunner:
         context = await self.memory.get_context(
             query=message, is_main_session=is_main_session
         )
+
+        # 2a. Append delegated context if provided
+        if context_injection:
+            context += (
+                f"\n\n<delegation_context>\n{context_injection}\n</delegation_context>"
+            )
+            log.debug("Context injection applied (%d chars) for chat_id=%s", len(context_injection), chat_id)
 
         # 3. Load history
         messages = await self.history.get_messages(chat_id)

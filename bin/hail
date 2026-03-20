@@ -3,10 +3,20 @@
 
 Reads agent list and ports from hollow.config.json at runtime.
 Run 'python setup.py' to generate hollow.config.json.
+
+Usage:
+    hail <agent> <task> [--user USER_ID] [--context CONTEXT_TEXT]
+
+Options:
+    --user USER_ID      Stable per-user chat_id (e.g. Tyler's Telegram ID).
+                        Results in chat_id "<agent>_<user>". Defaults to "_main".
+    --context TEXT      Context string injected into the agent's system prompt,
+                        giving the sub-agent background from the delegating session.
 """
 
 from __future__ import annotations
 
+import argparse
 import json
 import sys
 import urllib.error
@@ -47,13 +57,34 @@ def load_agents() -> dict[str, str]:
 def main():
     agents = load_agents()
 
+    parser = argparse.ArgumentParser(
+        description="Route tasks to specialist agents via HTTP POST.",
+        usage="hail <agent> <task...> [--user USER_ID] [--context CONTEXT]",
+    )
+    parser.add_argument("agent", help="Agent name")
+    parser.add_argument("task", nargs="+", help="Task description (multi-word ok)")
+    parser.add_argument(
+        "--user",
+        default=None,
+        metavar="USER_ID",
+        help="User identifier for stable per-user chat_id (e.g. Telegram chat_id)",
+    )
+    parser.add_argument(
+        "--context",
+        default="",
+        metavar="TEXT",
+        help="Context string to inject into the agent's system prompt",
+    )
+
     if len(sys.argv) < 3:
-        print("Usage: hail <agent> <task>")
-        print(f"Agents: {', '.join(sorted(agents))}")
+        parser.print_help()
+        print(f"\nAvailable agents: {', '.join(sorted(agents))}")
         sys.exit(1)
 
-    agent = sys.argv[1].lower()
-    task = " ".join(sys.argv[2:])
+    args = parser.parse_args()
+
+    agent = args.agent.lower()
+    task = " ".join(args.task)
 
     if agent not in agents:
         print(f"Unknown agent: {agent}")
@@ -61,8 +92,15 @@ def main():
         sys.exit(1)
 
     url = agents[agent]
-    chat_id = f"{agent}_main"
-    payload = json.dumps({"message": task, "chat_id": chat_id}).encode()
+    # Stable per-user chat_id: "<agent>_<user_id>" or fallback "<agent>_main"
+    user_suffix = args.user if args.user else "main"
+    chat_id = f"{agent}_{user_suffix}"
+
+    payload_data: dict = {"message": task, "chat_id": chat_id}
+    if args.context:
+        payload_data["context"] = args.context
+
+    payload = json.dumps(payload_data).encode()
     req = urllib.request.Request(
         url, data=payload, headers={"Content-Type": "application/json"}
     )

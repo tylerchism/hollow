@@ -45,7 +45,7 @@ def port_in_use(port):
             return False
 
 
-def launch(name, port, identity_dir, memory_dir):
+def launch(name, port, identity_dir, memory_dir, model=None):
     if port_in_use(port):
         print(f"  WARNING: port {port} already in use — {name} may already be running")
         return None
@@ -57,6 +57,8 @@ def launch(name, port, identity_dir, memory_dir):
     ]
     env = os.environ.copy()
     env["USER_TIMEZONE"] = user_tz
+    if model:
+        env["PRIMARY_MODEL"] = model
     log_file = hollow_root / "data" / f"{name}.log"
     log_file.parent.mkdir(parents=True, exist_ok=True)
     with open(log_file, "a") as lf:
@@ -67,7 +69,8 @@ def launch(name, port, identity_dir, memory_dir):
             cwd=str(hollow_root),
             env=env,
         )
-    print(f"  Started {name} (pid {proc.pid}) on port {port} — log: {log_file}")
+    model_str = f" [{model}]" if model else ""
+    print(f"  Started {name} (pid {proc.pid}) on port {port}{model_str} — log: {log_file}")
     return proc
 
 
@@ -78,6 +81,7 @@ print()
 # Launch coordinator
 coord_name = coord["name"]
 coord_port = coord["port"]
+coord_model = coord.get("model")
 coord_identity = hollow_root / "agents" / coord_name
 coord_memory = hollow_root / "agent-memory" / coord_name
 
@@ -92,7 +96,7 @@ if not coord_memory.exists():
     sys.exit(1)
 
 print(f"Coordinator: {coord_name}")
-p = launch(coord_name, coord_port, coord_identity, coord_memory)
+p = launch(coord_name, coord_port, coord_identity, coord_memory, model=coord_model)
 if p:
     procs.append(p)
 time.sleep(1)
@@ -102,6 +106,7 @@ print("Agents:")
 for agent in agents:
     name = agent["name"]
     port = agent["port"]
+    model = agent.get("model")
     identity_dir = hollow_root / "agents" / name
     memory_dir = hollow_root / "agent-memory" / name
 
@@ -112,7 +117,7 @@ for agent in agents:
         print(f"  WARNING: memory directory not found for {name}: {memory_dir} — skipping")
         continue
 
-    p = launch(name, port, identity_dir, memory_dir)
+    p = launch(name, port, identity_dir, memory_dir, model=model)
     if p:
         procs.append(p)
 
