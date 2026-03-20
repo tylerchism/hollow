@@ -41,7 +41,7 @@ Every agent in the team runs on the same model by default. This is set via `PRIM
 | Model | Notes |
 |-------|-------|
 | `claude-sonnet-4-6` | Default — strong balance of speed and capability |
-| `claude-opus-4-5` | More capable, significantly slower and more expensive |
+| `claude-opus-4-6` | More capable, significantly slower and more expensive |
 | `claude-haiku-4-5` | Fast and cheap, less capable — fine for lightweight agents |
 
 **Context summarization:** `claude-haiku-4-5` — hardcoded, not user-configurable. When an agent's conversation history exceeds the budget, old turns are summarized in the background using Haiku to keep costs low. This is always Haiku regardless of your primary model setting.

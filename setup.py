@@ -80,6 +80,34 @@ def validate_name(name: str) -> bool:
     return bool(NAME_PATTERN.match(name))
 
 
+MODEL_MAP = {
+    "1": "claude-sonnet-4-6",
+    "2": "claude-opus-4-6",
+    "3": "claude-haiku-4-5",
+}
+
+MODEL_DESCRIPTIONS = {
+    "claude-sonnet-4-6": "balanced speed + capability",
+    "claude-opus-4-6": "maximum capability, slower",
+    "claude-haiku-4-5": "fast, lighter tasks",
+}
+
+
+def prompt_model(label: str, default: str = "claude-sonnet-4-6") -> str:
+    """Prompt for a model choice with a numbered menu. Returns model ID string."""
+    default_desc = MODEL_DESCRIPTIONS.get(default, default)
+    cprint(f"\n  {label}:", "")
+    cprint(f"    1) claude-sonnet-4-6  [balanced speed + capability]", "dim")
+    cprint(f"    2) claude-opus-4-6    [maximum capability, slower]", "dim")
+    cprint(f"    3) claude-haiku-4-5   [fast, lighter tasks]", "dim")
+    cprint(f"    4) custom             [enter a model ID manually]", "dim")
+    choice = prompt(f"  Choice", default=default)
+    resolved = MODEL_MAP.get(choice.strip(), choice.strip()) or default
+    if choice.strip() == "4":
+        resolved = prompt("  Enter model ID", default=default)
+    return resolved
+
+
 def prompt_valid_name(msg: str, default: str = "") -> str:
     """Prompt until user enters a valid agent name."""
     while True:
@@ -548,7 +576,7 @@ def port_in_use(port):
         except ConnectionRefusedError:
             return False
 
-def launch(name, port, identity_dir, memory_dir):
+def launch(name, port, identity_dir, memory_dir, model=None):
     if port_in_use(port):
         print(f"  WARNING: port {port} already in use — {name} may already be running")
         return None
@@ -560,6 +588,8 @@ def launch(name, port, identity_dir, memory_dir):
     ]
     env = os.environ.copy()
     env["USER_TIMEZONE"] = user_tz
+    if model:
+        env["PRIMARY_MODEL"] = model
     log_file = hollow_root / "data" / f"{name}.log"
     log_file.parent.mkdir(parents=True, exist_ok=True)
     with open(log_file, "a") as lf:
@@ -570,7 +600,8 @@ def launch(name, port, identity_dir, memory_dir):
             cwd=str(hollow_root),
             env=env,
         )
-    print(f"  Started {name} (pid {proc.pid}) on port {port} — log: {log_file}")
+    model_str = f" [{model}]" if model else ""
+    print(f"  Started {name} (pid {proc.pid}) on port {port}{model_str} — log: {log_file}")
     return proc
 
 print("Hollow — starting agent system")
@@ -580,11 +611,12 @@ print()
 # Launch coordinator
 coord_name = coord["name"]
 coord_port = coord["port"]
+coord_model = coord.get("model")
 coord_identity = hollow_root / "agents" / coord_name
 coord_memory = hollow_root / "agent-memory" / coord_name
 
 print(f"Coordinator: {coord_name}")
-p = launch(coord_name, coord_port, coord_identity, coord_memory)
+p = launch(coord_name, coord_port, coord_identity, coord_memory, model=coord_model)
 if p:
     procs.append(p)
 time.sleep(1)
@@ -594,9 +626,10 @@ print(f"Agents:")
 for agent in agents:
     name = agent["name"]
     port = agent["port"]
+    model = agent.get("model")
     identity_dir = hollow_root / "agents" / name
     memory_dir = hollow_root / "agent-memory" / name
-    p = launch(name, port, identity_dir, memory_dir)
+    p = launch(name, port, identity_dir, memory_dir, model=model)
     if p:
         procs.append(p)
 
@@ -689,7 +722,12 @@ def collect_coordinator_info(existing: dict | None, agent_count: int) -> dict:
         port = all_ports[0]
         cprint(f"  Assigned coordinator port: {port}", "dim")
 
-    return {"name": name, "port": port, "description": description}
+    coord_model = prompt_model(
+        f"Model for {name}",
+        default=defaults.get("model", "claude-sonnet-4-6"),
+    )
+
+    return {"name": name, "port": port, "model": coord_model, "description": description}
 
 
 def collect_agents_info(existing: dict | None, coord_port: int) -> list[dict]:
@@ -753,11 +791,16 @@ def collect_agents_info(existing: dict | None, coord_port: int) -> list[dict]:
             "  Hail keyword (used in: hail <keyword> \"task\")",
             default=ex.get("hail_keyword", name),
         )
+        agent_model = prompt_model(
+            f"  Model for {name}",
+            default=ex.get("model", "claude-sonnet-4-6"),
+        )
 
         agents.append(
             {
                 "name": name,
                 "port": port,
+                "model": agent_model,
                 "role": role,
                 "description": description,
                 "hail_keyword": hail_keyword.lower(),
@@ -791,25 +834,6 @@ def collect_api_keys() -> dict[str, str]:
                 env[env_key] = new_val
             elif not required:
                 cprint(f"  Skipping {label}", "dim")
-
-    # Primary model selection
-    current_model = existing_env.get("PRIMARY_MODEL", "claude-sonnet-4-6")
-    cprint("\n  Primary model (used by all agents):", "")
-    cprint("    1) claude-sonnet-4-6  [default — balanced speed + capability]", "dim")
-    cprint("    2) claude-opus-4-5    [more capable, slower + more expensive]", "dim")
-    cprint("    3) claude-haiku-4-5   [fast + cheap, less capable]", "dim")
-    cprint("    4) custom             [enter a model ID manually]", "dim")
-    model_choice = prompt("  Primary model", default=current_model)
-    model_map = {
-        "1": "claude-sonnet-4-6",
-        "2": "claude-opus-4-5",
-        "3": "claude-haiku-4-5",
-    }
-    resolved = model_map.get(model_choice.strip(), model_choice.strip()) or "claude-sonnet-4-6"
-    if model_choice.strip() == "4":
-        resolved = prompt("  Enter model ID", default="claude-sonnet-4-6")
-    env["PRIMARY_MODEL"] = resolved
-    cprint(f"  Set PRIMARY_MODEL={resolved}", "green")
 
     handle_key("ANTHROPIC_API_KEY", "Anthropic API Key")
     handle_key("XAI_API_KEY", "xAI API Key (optional — for Grok/X search)")
