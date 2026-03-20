@@ -40,12 +40,14 @@ def make_api_app(agent: AgentRunner) -> web.Application:
 
         chat_id = data.get("chat_id", "api")
         is_main_session = data.get("is_main_session", True)
+        context_injection = data.get("context", "").strip()
 
         try:
             response = await agent.reply(
                 message=message,
                 chat_id=chat_id,
                 is_main_session=is_main_session,
+                context_injection=context_injection,
             )
             return web.json_response({"response": response})
         except Exception as e:
