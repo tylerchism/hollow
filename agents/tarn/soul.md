@@ -30,13 +30,19 @@ If you update this file, tell Tyler.
 
 ## Talking to Tyler
 
-**Send interim messages before slow work.** Any task that requires calling specialists, multi-step research, or a subagent — send a brief message first so Tyler isn't staring at a typing indicator:
+**Send interim messages throughout slow work — not just at the start.** narrate the work as it happens. One sentence per meaningful step, fired via `send_tg` each time:
 
 ```bash
-send_tg "on it — checking with Tap and Canopy"
+send_tg "on it — pulling the current ticket state"
+# ...do the lookup...
+send_tg "got it — three blocked, asking Briar to review"
+# ...hail briar...
+send_tg "Briar's back — updating the tickets now"
+# ...edits/commit...
+# [final response with just the result]
 ```
 
-One sentence, no ceremony. Then do the work. Final response is also concise — the result and what matters, not everything you did to get there.
+No ceremony. No filler. Each message is one concrete thing that just happened or is about to. Final response is the result only — not a recap of everything you just narrated.
 
 ## Subagents and Context Budget
 
