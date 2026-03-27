@@ -1,0 +1,117 @@
+#!/usr/bin/env python3
+"""Analyze a tweet (including video) via xAI/Grok's native X platform access.
+
+Usage:
+  xtv "https://x.com/user/status/12345"
+  xtv "https://x.com/user/status/12345" --prompt "What is being said in the video?"
+
+Grok has native X platform access via the web_search tool, which lets it read
+tweet content and video. This is different from the vision API (which only accepts
+direct image files). If video transcript is needed, yt-dlp + whisper is required.
+"""
+
+import json
+import os
+import sys
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+
+def _load_env_file(path):
+    p = Path(path)
+    if not p.exists():
+        return
+    for line in p.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, val = line.partition("=")
+        key = key.strip()
+        val = val.strip().strip('"').strip("'")
+        if key and key not in os.environ:
+            os.environ[key] = val
+
+
+_hollow_root = Path(__file__).parent.parent
+_load_env_file(_hollow_root / ".env")
+_load_env_file(_hollow_root / "agents" / "tarn" / ".env")
+
+API_KEY = os.environ.get("XAI_API_KEY", "")
+ENDPOINT = "https://api.x.ai/v1/responses"
+
+
+def main():
+    if len(sys.argv) < 2:
+        print("Usage: xtv \"<tweet_url>\" [--prompt=\"custom prompt\"]")
+        sys.exit(1)
+
+    tweet_url = sys.argv[1]
+    custom_prompt = None
+    for arg in sys.argv[2:]:
+        if arg.startswith("--prompt="):
+            custom_prompt = arg.split("=", 1)[1]
+
+    if not API_KEY:
+        print("Error: XAI_API_KEY not set", file=sys.stderr)
+        sys.exit(1)
+
+    prompt = custom_prompt or (
+        f"Please analyze this tweet: {tweet_url}\n\n"
+        "Provide:\n"
+        "1. The full text of the tweet\n"
+        "2. Who posted it and any relevant context about them\n"
+        "3. If there is a video or image, describe what is shown/said in detail — "
+        "include any spoken words or text visible in the video\n"
+        "4. Any relevant replies or quote tweets if notable"
+    )
+
+    payload = json.dumps({
+        "model": "grok-4-1-fast",
+        "input": [
+            {
+                "role": "system",
+                "content": (
+                    "You have native access to X/Twitter content. When given a tweet URL, "
+                    "retrieve and analyze the full tweet including any video or image content. "
+                    "For videos, describe what is shown and transcribe any spoken words as accurately as possible."
+                ),
+            },
+            {"role": "user", "content": prompt},
+        ],
+        "tools": [{"type": "web_search"}],
+    }).encode()
+
+    req = urllib.request.Request(ENDPOINT, data=payload)
+    req.add_header("Content-Type", "application/json")
+    req.add_header("Authorization", f"Bearer {API_KEY}")
+    req.add_header("User-Agent", "hollow-xtv/1.0")
+
+    try:
+        with urllib.request.urlopen(req, timeout=90) as resp:
+            data = json.loads(resp.read().decode())
+            output = data.get("output", [])
+            for item in output:
+                if item.get("type") == "message":
+                    for content in item.get("content", []):
+                        if content.get("type") == "output_text":
+                            print(content.get("text", ""))
+                            annotations = content.get("annotations", [])
+                            if annotations:
+                                print("\n--- Sources ---")
+                                for a in annotations:
+                                    if a.get("type") == "url_citation":
+                                        print(f"  {a.get('title', 'Untitled')}: {a.get('url', '')}")
+            if not output:
+                print(json.dumps(data, indent=2))
+    except urllib.error.HTTPError as e:
+        body = e.read().decode() if e.fp else ""
+        print(f"API error {e.code}: {body}", file=sys.stderr)
+        sys.exit(1)
+    except urllib.error.URLError as e:
+        print(f"Connection error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
