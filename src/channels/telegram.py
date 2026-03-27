@@ -264,6 +264,15 @@ class TelegramBot:
         self.app.add_handler(
             MessageHandler(filters.TEXT & ~filters.COMMAND, self._handle_message)
         )
+        self.app.add_handler(
+            MessageHandler(filters.PHOTO, self._handle_photo)
+        )
+        self.app.add_handler(
+            MessageHandler(filters.Document.ALL, self._handle_document)
+        )
+        self.app.add_handler(
+            MessageHandler(filters.VOICE | filters.AUDIO, self._handle_voice)
+        )
 
         log.info("Starting Telegram bot (polling)...")
         await self.app.initialize()
@@ -426,32 +435,113 @@ class TelegramBot:
             f"User ID: {user.id}\nUsername: @{user.username or 'none'}"
         )
 
-    async def _handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        update_id = update.update_id
+    async def _download_to_tmp(self, file_id: str, suffix: str) -> str:
+        """Download a Telegram file to /tmp and return the local path."""
+        import pathlib, tempfile
+        tg_file = await self.app.bot.get_file(file_id)
+        tmp_path = pathlib.Path(tempfile.gettempdir()) / f"tarn_{file_id}{suffix}"
+        await tg_file.download_to_drive(str(tmp_path))
+        return str(tmp_path)
+
+    async def _handle_photo(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle photo messages — download and pass to agent as a readable file path."""
         user_id = update.effective_user.id
         chat_id = str(update.effective_chat.id)
+        if not self._is_allowed(user_id):
+            return
+
+        # Best quality = last photo in the array
+        photo = update.message.photo[-1]
+        local_path = await self._download_to_tmp(photo.file_id, ".jpg")
+        caption = update.message.caption or ""
+
+        message_text = f"[Image sent via Telegram — use the Read tool to view it: {local_path}]"
+        if caption:
+            message_text += f"\n\nCaption: {caption}"
+
+        await self._process_and_reply(update, chat_id, user_id, message_text)
+
+    async def _handle_document(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle documents (files). Images sent as files, PDFs, text files, etc."""
+        user_id = update.effective_user.id
+        chat_id = str(update.effective_chat.id)
+        if not self._is_allowed(user_id):
+            return
+
+        doc = update.message.document
+        mime = doc.mime_type or ""
+        filename = doc.file_name or f"file_{doc.file_id}"
+
+        # Determine suffix from filename or mime type
+        import pathlib
+        suffix = pathlib.Path(filename).suffix or ""
+        if not suffix:
+            if "pdf" in mime:
+                suffix = ".pdf"
+            elif "image" in mime:
+                suffix = ".jpg"
+            elif "text" in mime:
+                suffix = ".txt"
+
+        local_path = await self._download_to_tmp(doc.file_id, suffix)
+        caption = update.message.caption or ""
+
+        if "image" in mime or suffix in (".jpg", ".jpeg", ".png", ".gif", ".webp"):
+            message_text = f"[Image file sent via Telegram — use the Read tool to view it: {local_path}]"
+        elif suffix == ".pdf":
+            message_text = f"[PDF file sent via Telegram — use the Read tool to view it: {local_path}]"
+        else:
+            message_text = f"[File sent via Telegram: {filename} — saved to {local_path}]"
+
+        if caption:
+            message_text += f"\n\nCaption: {caption}"
+
+        await self._process_and_reply(update, chat_id, user_id, message_text)
+
+    async def _handle_voice(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle voice messages and audio files."""
+        user_id = update.effective_user.id
+        chat_id = str(update.effective_chat.id)
+        if not self._is_allowed(user_id):
+            return
+
+        if update.message.voice:
+            audio = update.message.voice
+            suffix = ".ogg"
+            label = "Voice message"
+        else:
+            audio = update.message.audio
+            suffix = ".mp3"
+            label = f"Audio: {getattr(audio, 'file_name', 'audio')}"
+
+        local_path = await self._download_to_tmp(audio.file_id, suffix)
+        duration = getattr(audio, "duration", "?")
+
+        message_text = (
+            f"[{label} sent via Telegram ({duration}s) — saved to {local_path}. "
+            f"Audio transcription requires whisper (not yet installed). "
+            f"Let Tyler know if you need this transcribed.]"
+        )
+
+        await self._process_and_reply(update, chat_id, user_id, message_text)
+
+    async def _process_and_reply(
+        self,
+        update: Update,
+        chat_id: str,
+        user_id: int,
+        message_text: str,
+    ) -> None:
+        """Shared processing pipeline for all message types."""
+        update_id = update.update_id
         is_dm = self._is_dm(update)
-        message_text = update.message.text
 
-        # Dedup: drop re-delivered updates that were already processed (within TTL)
         if self._offset_store.is_duplicate(update_id):
-            log.info("Dropping duplicate update_id=%d (already processed, within dedup TTL)", update_id)
+            log.info("Dropping duplicate update_id=%d", update_id)
             return
 
-        if is_dm and not self._is_allowed(user_id):
-            return
-
-        if not is_dm and not self._is_mentioned(update):
-            return
-
-        # Strip bot mention in groups
-        if not is_dm and self.app.bot.username:
-            message_text = message_text.replace(f"@{self.app.bot.username}", "").strip()
-
-        # Send typing immediately
         await update.effective_chat.send_action("typing")
 
-        # Write active chat_id to a temp file so bin/send_tg can send interim messages mid-turn
         try:
             import pathlib, tempfile
             active_chat_file = pathlib.Path(tempfile.gettempdir()) / "tarn_active_chat_id"
@@ -459,12 +549,9 @@ class TelegramBot:
         except Exception:
             pass
 
-        # Register this update as in-flight before enqueuing
         self._offset_store.mark_in_flight(update_id)
 
-        # Build handler and enqueue
         async def process():
-            # Typing keepalive — refresh every 4 seconds until done
             done = asyncio.Event()
 
             async def typing_keepalive():
@@ -477,25 +564,20 @@ class TelegramBot:
                             pass
 
             keepalive_task = asyncio.create_task(typing_keepalive())
-
             try:
                 response = await self.agent.reply(
                     message=message_text,
                     chat_id=chat_id,
                     is_main_session=is_dm,
                 )
-
                 if len(response) <= 4096:
                     await update.message.reply_text(response)
                 else:
                     for i in range(0, len(response), 4096):
                         await update.message.reply_text(response[i : i + 4096])
-
             except Exception:
-                log.exception("Error processing message from chat %s", chat_id)
-                await update.message.reply_text(
-                    "Something went wrong. Try again in a moment."
-                )
+                log.exception("Error processing media message from chat %s", chat_id)
+                await update.message.reply_text("Something went wrong. Try again in a moment.")
             finally:
                 done.set()
                 keepalive_task.cancel()
@@ -503,7 +585,24 @@ class TelegramBot:
                     await keepalive_task
                 except asyncio.CancelledError:
                     pass
-                # Always mark completed so the watermark advances (even on error)
                 await self._offset_store.mark_completed(update_id)
 
         await self._queue.enqueue(chat_id, process)
+
+    async def _handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        user_id = update.effective_user.id
+        chat_id = str(update.effective_chat.id)
+        is_dm = self._is_dm(update)
+        message_text = update.message.text
+
+        if is_dm and not self._is_allowed(user_id):
+            return
+
+        if not is_dm and not self._is_mentioned(update):
+            return
+
+        # Strip bot mention in groups
+        if not is_dm and self.app.bot.username:
+            message_text = message_text.replace(f"@{self.app.bot.username}", "").strip()
+
+        await self._process_and_reply(update, chat_id, user_id, message_text)
