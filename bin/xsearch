@@ -6,6 +6,29 @@ import os
 import sys
 import urllib.error
 import urllib.request
+from pathlib import Path
+
+
+def _load_env_file(path):
+    """Load key=value pairs from a .env file into os.environ (no-op if missing)."""
+    p = Path(path)
+    if not p.exists():
+        return
+    for line in p.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, val = line.partition("=")
+        key = key.strip()
+        val = val.strip().strip('"').strip("'")
+        if key and key not in os.environ:
+            os.environ[key] = val
+
+
+# Load from hollow root .env and tarn agent .env as fallbacks
+_hollow_root = Path(__file__).parent.parent
+_load_env_file(_hollow_root / ".env")
+_load_env_file(_hollow_root / "agents" / "tarn" / ".env")
 
 API_KEY = os.environ.get("XAI_API_KEY", "")
 ENDPOINT = "https://api.x.ai/v1/responses"
