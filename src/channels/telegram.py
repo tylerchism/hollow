@@ -375,6 +375,15 @@ class TelegramBot:
         except Exception:
             log.exception("Error surfacing missed messages — continuing startup")
 
+    @property
+    def is_running(self) -> bool:
+        """True if the bot is connected and polling."""
+        return (
+            self.app is not None
+            and self.app.updater is not None
+            and self.app.updater.running
+        )
+
     async def stop(self) -> None:
         """Graceful shutdown."""
         await self._queue.shutdown()

@@ -8,7 +8,7 @@
 set -euo pipefail
 
 TARN_PORT=18800
-TARN_DIR="HOLLOW_ROOT"
+TARN_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 LOG_FILE="/tmp/tarn.log"
 
 echo "[restart-tarn] Killing ALL old Tarn processes..."
@@ -80,11 +80,11 @@ echo "[restart-tarn] Starting new Tarn process..."
 # Start the new process fully detached so it survives this script exiting.
 # setsid creates a new session; nohup keeps it alive after the parent dies.
 cd "$TARN_DIR"
-setsid nohup /usr/local/bin/uv run python -m src.main \
+setsid nohup uv run python -m src.main \
   --port "$TARN_PORT" \
-  --identity-dir HOLLOW_ROOT/agents/tarn \
-  --memory-dir HOLLOW_ROOT/agent-memory/tarn \
-  --data-dir HOLLOW_ROOT/data \
+  --identity-dir "$TARN_DIR/agents/tarn" \
+  --memory-dir "$TARN_DIR/agent-memory/tarn" \
+  --data-dir "$TARN_DIR/data" \
   >> "$LOG_FILE" 2>&1 &
 
 NEW_PID=$!

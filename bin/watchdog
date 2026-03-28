@@ -1,4 +1,4 @@
-#!HOLLOW_ROOT/.venv/bin/python3
+#!/usr/bin/env python3
 """
 watchdog — Ping all hollow agents, send Telegram alert if any are unresponsive.
 
@@ -8,7 +8,7 @@ Usage:
     watchdog --once        # Skip cooldown (force alert even if recently notified)
 
 Designed to run as a cron job every 5 minutes:
-    */5 * * * * HOLLOW_ROOT/bin/watchdog >> HOLLOW_ROOT/data/watchdog.log 2>&1
+    */5 * * * * /path/to/hollow/bin/watchdog >> /path/to/hollow/data/watchdog.log 2>&1
 
 Cooldown: won't re-alert for the same agent within COOLDOWN_MINUTES (default: 15).
 State file: /tmp/hollow-watchdog-state.json
@@ -37,7 +37,7 @@ STATE_FILE    = Path("/tmp/hollow-watchdog-state.json")
 
 HEALTH_TIMEOUT  = 5       # seconds per agent health check
 COOLDOWN_MINUTES = 15     # don't re-alert same agent within this window
-TYLER_CHAT_ID   = YOUR_TELEGRAM_CHAT_ID  # static fallback — doesn't depend on active session
+TYLER_CHAT_ID   = 0  # static fallback — set HEARTBEAT_CHAT_ID in agents/tarn/.env
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
