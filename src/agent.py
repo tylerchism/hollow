@@ -358,6 +358,23 @@ class AgentRunner:
         except BaseException as e:
             if isinstance(e, asyncio.CancelledError):
                 raise
+            # Detect shutdown-related errors: SIGTERM causes the Claude Code SDK
+            # subprocess to exit with code 143, surfaced as a plain Exception with
+            # "exit code 143" in the message. Also catch CancelledError subclasses
+            # by name (e.g. from trio/anyio interop) and stop_event if available.
+            _is_shutdown = (
+                "exit code 143" in str(e)
+                or type(e).__name__ == "CancelledError"
+                or (hasattr(self, "stop_event") and self.stop_event is not None and self.stop_event.is_set())
+            )
+            if _is_shutdown:
+                log.info(
+                    "SDK stream interrupted by shutdown signal (suppressing error message): [%s] %s",
+                    type(e).__name__,
+                    e or "(empty message)",
+                )
+                # Silently swallow — the new process will send its own startup message
+                return reply_text or ""
             if reply_text:
                 log.debug("SDK stream ended with error (response already received): %s", e)
             else:

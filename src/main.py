@@ -403,7 +403,7 @@ async def run(args: argparse.Namespace = None):
     api_app = make_api_app(agent, bot=bot, discord_bot=discord_bot)
     api_runner = web.AppRunner(api_app)
     await api_runner.setup()
-    _port_retries = 10
+    _port_retries = 20
     for _attempt in range(1, _port_retries + 1):
         try:
             # Re-create TCPSite each attempt: aiohttp registers the site in the
@@ -424,7 +424,7 @@ async def run(args: argparse.Namespace = None):
                 api_runner._sites.remove(site)  # type: ignore[attr-defined]
             except (ValueError, AttributeError):
                 pass
-            await asyncio.sleep(1)
+            await asyncio.sleep(1.5)
     log.info("HTTP API listening on http://%s:%d", config.api_host, config.api_port)
 
     stop_event = asyncio.Event()
@@ -475,6 +475,16 @@ async def run(args: argparse.Namespace = None):
         await api_runner.cleanup()
         await agent.history.close()
         await memory.close()
+        # Clean up stale active-channel temp files so they don't mis-route
+        # messages after a restart.
+        for _tmp_file in (
+            Path("/tmp/tarn_active_chat_id"),
+            Path("/tmp/tarn_active_discord_channel"),
+        ):
+            try:
+                _tmp_file.unlink(missing_ok=True)
+            except Exception:
+                log.debug("Failed to remove %s on shutdown (non-fatal)", _tmp_file, exc_info=True)
         log.info("Shutdown complete.")
 
 

@@ -69,6 +69,12 @@ if [ "$PORT_FREE" -eq 0 ]; then
   exit 1
 fi
 
+# Extra buffer: lsof reports the port free before the OS fully releases the
+# socket (TIME_WAIT state). Give aiohttp 2 extra seconds to fully relinquish
+# the socket so the new process can bind on the first attempt.
+echo "[restart-tarn] Waiting 2s for socket TIME_WAIT to fully clear..."
+sleep 2
+
 echo "[restart-tarn] Starting new Tarn process..."
 
 # Start the new process fully detached so it survives this script exiting.
