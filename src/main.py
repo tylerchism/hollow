@@ -340,7 +340,19 @@ async def run(args: argparse.Namespace = None):
     api_runner = web.AppRunner(api_app)
     await api_runner.setup()
     site = web.TCPSite(api_runner, config.api_host, config.api_port)
-    await site.start()
+    _port_retries = 10
+    for _attempt in range(1, _port_retries + 1):
+        try:
+            await site.start()
+            break
+        except OSError as _e:
+            if _attempt == _port_retries:
+                raise
+            log.warning(
+                "Port %d not yet free (%s), retrying %d/%d...",
+                config.api_port, _e, _attempt, _port_retries,
+            )
+            await asyncio.sleep(1)
     log.info("HTTP API listening on http://%s:%d", config.api_host, config.api_port)
 
     stop_event = asyncio.Event()
