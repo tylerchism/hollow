@@ -3,12 +3,11 @@
     "name": "morning_brief",
     "schedule": "0 6 * * *",
     "tz": "America/Chicago",
-    "prompt": "Good morning. Run the morning brief for Tyler. Structure it in this order:\n\n(1) ⚠ DECISION ESCALATION — Run `mc tasks list --status=blocked` and parse the JSON. For each blocked task with a blocked_reason, compute its age using Bash: `echo $(( ( $(date +%s) - $(date -d '[created_at]' +%s) ) / 3600 ))`. Use created_at as the staleness anchor. If age > 72 hours, surface it prominently under '⚠ DECISION NEEDED — ACTIVELY BLOCKING'. For each: (a) Decision needed, (b) Blocked since [days ago], (c) What it unblocks, (d) One clear yes/no ask.\n\n(2) 📬 TYLER'S INBOX — Run `mc tasks list --status=blocked` for tasks under 72h and any tagged needs-tyler. Summarize concisely.\n\n(3) 🔄 TEAM STATUS — Check in_progress tasks. Flag any updated more than 60 minutes ago as stalled. List what the team is working on today (ready + in_progress).\n\n(4) 🤖 AI NEWS — Use WebSearch to find the top 3-5 AI developments from the last 24 hours. Focus on model releases, significant research, and anything relevant to multi-agent systems or Claude/Anthropic specifically. One sentence per item with a link.\n\n(5) 🎪 UPCOMING CONFERENCES — Use xsearch and WebSearch to find conferences and events in the next 6 months that match Tyler's interests: regenerative agriculture, homesteading, permaculture, ancestral health, Weston A. Price, food is medicine, mitochondrial health, rewilding, Kyle Cease events, libertarian/America First gatherings, food freedom, rogue food. Only include events Tyler likely hasn't heard of or hasn't been reminded of recently — skip FreedomFest (already booked). Include: event name, date, location, and registration link if available. Aim for 3-5 events, prioritize ones with near registration deadlines.\n\n(6) 💡 GOAL-ALIGNED IDEAS — Generate 2 fresh ideas that could push Tyler meaningfully toward his goals. Do not pull from the MC list — these should be original, specific, and actionable. Goals to draw from: land sovereignty / homesteading, ancestral health, growing Hollow, community connection. One sentence each — seed, not essay.
-
-(7) 💛 SOCIAL / DATING — One fresh idea or upcoming local event for meeting women who share Tyler's values. Tyler is single, introverted, based in [LOCATION], frequently in NW Arkansas (Fayetteville/Bentonville). Best environments: shared-interest settings where the activity does the talking — foraging walks, homestead skill shares, farmers markets, fermentation workshops, farm dinners, regen ag events, ancestral health gatherings, Kyle Cease events, permaculture convergences. Use WebSearch or xsearch to find a real local or regional event if possible; otherwise generate a specific creative idea. One item, concrete and actionable.\n\nDeliver the full brief to Tyler via Telegram. Keep each section tight.",
+    "prompt": "Good morning. Run the morning brief for Tyler. Structure it in this order:\n\n(1) ⚠ DECISION ESCALATION — Run `mc tasks list --status=blocked` and parse the JSON. For each blocked task with a blocked_reason, compute its age using Bash: `echo $(( ( $(date +%s) - $(date -d '[created_at]' +%s) ) / 3600 ))`. Use created_at as the staleness anchor. If age > 72 hours, surface it prominently under '⚠ DECISION NEEDED — ACTIVELY BLOCKING'. For each: (a) Decision needed, (b) Blocked since [days ago], (c) What it unblocks, (d) One clear yes/no ask.\n\n(2) 📬 TYLER'S INBOX — Run `mc tasks list --status=blocked` for tasks under 72h and any tagged needs-tyler. Summarize concisely.\n\n(3) 🔄 TEAM STATUS — Check in_progress tasks. Flag any updated more than 60 minutes ago as stalled. List what the team is working on today (ready + in_progress).\n\n(4) 🤖 AI NEWS — Use WebSearch to find the top 3-5 AI developments from the last 24 hours. Focus on model releases, significant research, and anything relevant to multi-agent systems or Claude/Anthropic specifically. One sentence per item with a link.\n\n(5) 🎪 UPCOMING CONFERENCES — Use xsearch and WebSearch to find conferences and events in the next 6 months that match Tyler's interests: regenerative agriculture, homesteading, permaculture, ancestral health, Weston A. Price, food is medicine, mitochondrial health, rewilding, Kyle Cease events, libertarian/America First gatherings, food freedom, rogue food. Only include events Tyler likely hasn't heard of or hasn't been reminded of recently — skip FreedomFest (already booked). Include: event name, date, location, and registration link if available. Aim for 3-5 events, prioritize ones with near registration deadlines.\n\n(6) 💡 GOAL-ALIGNED IDEAS — Generate 2 fresh ideas that could push Tyler meaningfully toward his goals. Do not pull from the MC list — these should be original, specific, and actionable. Goals to draw from: land sovereignty / homesteading, ancestral health, growing Hollow, community connection. One sentence each — seed, not essay.\n\n(7) 💛 SOCIAL / DATING — One fresh idea or upcoming local event for meeting women who share Tyler's values. Tyler is single, introverted, based in [LOCATION], frequently in NW Arkansas (Fayetteville/Bentonville). Best environments: shared-interest settings where the activity does the talking — foraging walks, homestead skill shares, farmers markets, fermentation workshops, farm dinners, regen ag events, ancestral health gatherings, Kyle Cease events, permaculture convergences. Use WebSearch or xsearch to find a real local or regional event if possible; otherwise generate a specific creative idea. One item, concrete and actionable.\n\nDeliver the full brief to Tyler via Telegram. Keep each section tight.",
     "model": "claude-sonnet-4-6",
     "is_main_session": true,
     "notify_telegram": true,
+    "discord_channel_name": "morning-brief",
     "chat_id": "cron_morning_brief"
   },
   {
@@ -18,7 +17,8 @@
     "prompt": "Run Ideas Review with full team panel. Steps: 1. Run `mc ideas list` to find ideas with status=ready. If none, stop and say so. 2. For each ready idea, note the full idea title AND body text — both will be used throughout. 3. Call these agents sequentially via the hail CLI, substituting the actual title and body: (a) `hail canopy 'Evaluate this idea for strategic value — Title: [title]. Body: [body]. Worth pursuing? What angle makes it most valuable?'` (b) `hail briar 'Stress-test this idea — Title: [title]. Body: [body]. Risks, scope traps, missing pieces?'` (c) `hail forge 'Structure this as an actionable ticket — Title: [title]. Body: [body]. Return: recommended task title, full description with context + acceptance criteria + subtasks, and whether this is a task or spike.'` 4. Using Forge's structured output as the primary source, write a task description that includes: the original idea context (from the idea body), Forge's acceptance criteria and subtasks, and any critical flags from Canopy or Briar. 5. Create the task via `mc tasks create` with that synthesized description — never leave the description empty. If Forge classifies it as a spike, tag it 'spike' and include in the description what follow-up tasks or decisions are expected to come out of it. 6. PATCH the idea to status=converted and set linked_task_id to the new task id. 7. Deliver summary to Tyler.",
     "model": "claude-sonnet-4-6",
     "is_main_session": false,
-    "notify_telegram": true,
+    "notify_telegram": false,
+    "discord_channel_name": "ideas",
     "chat_id": "cron_ideas_review"
   },
   {
@@ -28,7 +28,8 @@
     "prompt": "Run Backlog Triage. Use hail CLI: (1) Run `mc tasks list --status=backlog` to collect backlog tasks. (2) `hail forge 'Run backlog triage on these tasks: [list]. For each: actionable and scoped? mark ready. Needs Tyler? mark blocked with blocked_reason + needs-tyler tag. Too vague? leave in backlog with note.'` (3) For tasks Forge flags as risky: `hail briar 'Quick risk check before marking ready: [task]. Hidden risks or missing pieces?'` (4) Execute mc tasks update calls based on team decisions. Deliver triage summary to Tyler.",
     "model": "claude-sonnet-4-6",
     "is_main_session": false,
-    "notify_telegram": true,
+    "notify_telegram": false,
+    "discord_channel_name": "tasks",
     "chat_id": "cron_backlog_triage"
   },
   {
@@ -38,7 +39,8 @@
     "prompt": "Run the Task Executor. Run `mc tasks list --status=ready` and find all ready tasks sorted by priority (high first). For each ready task: (1) `mc tasks update <id> --status=in_progress`. (2) Route based on task type: coding/files/execution → use Bash to spawn Claude Code; research/analysis → hail appropriate specialist; quick/coordination → handle directly. (3) Complete the task. (4) CRITICAL — if the task title starts with 'SPIKE:' or is tagged 'spike': before marking done, create at least one follow-up task via `mc tasks create`. This may be an actionable next step, another spike to dig deeper, or a task tagged needs-tyler with questions Tyler must answer — but it MUST be a task, not just a chat message. The spike is not done until the follow-up task exists. (5) `mc tasks update <id> --status=done`. (6) `mc activity log 'completed: [task title]'`. Process ALL ready tasks, not just one. Never mark done without actually completing the work.",
     "model": "claude-sonnet-4-6",
     "is_main_session": true,
-    "notify_telegram": true,
+    "notify_telegram": false,
+    "discord_channel_name": "tasks",
     "chat_id": "cron_task_executor"
   },
   {
@@ -48,7 +50,8 @@
     "prompt": "Run Team Retro. (1) Run `mc tasks list` to collect done/blocked/in_progress tasks. (2) TYLER DECISION THROUGHPUT — this is the first metric, always compute it before anything else: (a) Count how many tasks moved from blocked→done in the last 48h (Tyler unblocked something). (b) List all currently blocked tasks with a blocked_reason, sorted by created_at age (oldest first), with age in days. (c) If the count in (a) is zero: lead the retro with '⚠ ZERO TYLER DECISIONS IN LAST 48H' and list the pending decisions by age. If zero for two consecutive retro cycles, make this the entire lede — the team shipped tasks but the actual constraint (Tyler decision cadence) is frozen. (3) `hail canopy 'Quick retro: here is what shipped and what got stuck: [list]. Tyler decisions made last 48h: [count]. Pending Tyler decisions: [list with ages]. Patterns? Process improvements?'` (4) `hail briar 'Same retro data: [list]. Tyler decision throughput: [count] in last 48h, [N] pending. Concerns? Failure modes? What to change before it becomes a real problem?'` (5) If either recommends a process change, create a task or idea via mc CLI. (6) Deliver tight retro summary to Tyler — Tyler decision throughput metric always appears first.",
     "model": "claude-sonnet-4-6",
     "is_main_session": false,
-    "notify_telegram": true,
+    "notify_telegram": false,
+    "discord_channel_name": "tasks",
     "chat_id": "cron_team_retro"
   }
 ]
