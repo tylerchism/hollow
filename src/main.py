@@ -189,6 +189,32 @@ def check_setup(config, require_telegram: bool = True) -> list[str]:
     return issues
 
 
+async def _send_startup_notification(config, bot, discord_bot) -> None:
+    """Fire an 'I'm back' notification on all available channels after a brief delay."""
+    # Wait a few seconds for Discord to fully connect before sending
+    await asyncio.sleep(5)
+
+    msg = "I'm back — restarted and ready. What are we working on?"
+
+    # Telegram: send to heartbeat_chat_id
+    if bot and config.heartbeat_chat_id:
+        try:
+            await bot.send_message(config.heartbeat_chat_id, msg)
+            log.info("Startup notification sent via Telegram")
+        except Exception:
+            log.exception("Failed to send Telegram startup notification")
+
+    # Discord: post to #tarn channel on every connected guild
+    if discord_bot and discord_bot._client:
+        try:
+            for guild in discord_bot._client.guilds:
+                sent = await discord_bot.send_to_named_channel(guild, "tarn", msg)
+                if sent:
+                    log.info("Startup notification sent to Discord #tarn in guild %s", guild.name)
+        except Exception:
+            log.exception("Failed to send Discord startup notification")
+
+
 async def run(args: argparse.Namespace = None):
     """Main async entry point — HTTP API + Telegram bot + APScheduler."""
     config = load_config()
@@ -269,6 +295,11 @@ async def run(args: argparse.Namespace = None):
 
         scheduler.start()
         log.info("APScheduler started with %d job(s)", len(scheduler.get_jobs()))
+
+        # Send startup notification so Tyler knows we're back up
+        asyncio.create_task(
+            _send_startup_notification(config, bot, discord_bot)
+        )
 
         print("Hollow is running. Press Ctrl+C to stop.")
         await stop_event.wait()
