@@ -101,7 +101,7 @@ def main():
                         },
                         {"role": "user", "content": prompt},
                     ],
-                    "tools": [{"type": "web_search"}],
+                    "tools": [{"type": "x_search"}, {"type": "web_search"}],
                 },
                 timeout=120,
             )
