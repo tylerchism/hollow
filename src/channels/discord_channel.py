@@ -126,7 +126,10 @@ class DiscordBot:
 
     def _write_active_channel(self, channel_id: str) -> None:
         try:
+            import time
             ACTIVE_CHANNEL_FILE.write_text(channel_id)
+            ts_file = pathlib.Path(tempfile.gettempdir()) / "tarn_active_discord_ts"
+            ts_file.write_text(str(int(time.time())))
         except Exception:
             pass
 
@@ -152,6 +155,17 @@ class DiscordBot:
             return False
         await self._send_chunked(channel, text)
         return True
+
+    def get_tarn_chat_ids(self) -> list[tuple[str, "discord.TextChannel"]]:
+        """Return (chat_id_str, channel) for every 'tarn' channel across all guilds."""
+        if not self._client:
+            return []
+        results = []
+        for guild in self._client.guilds:
+            channel = discord.utils.get(guild.text_channels, name=TARN_CHANNEL_NAME)
+            if channel is not None:
+                results.append((str(channel.id), channel))
+        return results
 
     async def _send_chunked(self, channel, text: str) -> None:
         """Send text to a channel, splitting at Discord's 2000-char limit."""

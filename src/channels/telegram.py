@@ -543,9 +543,11 @@ class TelegramBot:
         await update.effective_chat.send_action("typing")
 
         try:
-            import pathlib, tempfile
+            import pathlib, tempfile, time
             active_chat_file = pathlib.Path(tempfile.gettempdir()) / "tarn_active_chat_id"
             active_chat_file.write_text(chat_id)
+            ts_file = pathlib.Path(tempfile.gettempdir()) / "tarn_active_telegram_ts"
+            ts_file.write_text(str(int(time.time())))
         except Exception:
             pass
 

@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!HOLLOW_ROOT/.venv/bin/python3
 """
 watchdog — Ping all hollow agents, send Telegram alert if any are unresponsive.
 

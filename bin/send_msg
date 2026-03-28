@@ -4,8 +4,8 @@
 # Usage: send_msg "message text"
 #
 # Checks both /tmp/tarn_active_discord_channel (Discord) and
-# /tmp/tarn_active_chat_id (Telegram) and sends to whichever is set.
-# If both are set, sends to both.
+# /tmp/tarn_active_chat_id (Telegram) and sends to whichever received the
+# most recent inbound message. If only one is set, uses that one.
 # If neither is set, exits with error.
 #
 # This is the unified interim-messaging script for soul.md.
@@ -17,6 +17,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 DISCORD_ACTIVE_FILE="/tmp/tarn_active_discord_channel"
 TELEGRAM_ACTIVE_FILE="/tmp/tarn_active_chat_id"
+DISCORD_TS_FILE="/tmp/tarn_active_discord_ts"
+TELEGRAM_TS_FILE="/tmp/tarn_active_telegram_ts"
 
 if [[ $# -lt 1 ]]; then
     echo "Usage: send_msg \"message text\"" >&2
@@ -25,41 +27,43 @@ fi
 
 MESSAGE="$*"
 
-SENT=0
-ERRORS=0
+DISCORD_CHANNEL=""
+TELEGRAM_CHAT=""
+DISCORD_TS=0
+TELEGRAM_TS=0
 
-# Try Discord
 if [[ -f "$DISCORD_ACTIVE_FILE" ]]; then
-    CHANNEL_ID="$(cat "$DISCORD_ACTIVE_FILE")"
-    if [[ -n "$CHANNEL_ID" ]]; then
-        if "$SCRIPT_DIR/send_discord" "$MESSAGE"; then
-            SENT=$((SENT + 1))
-        else
-            ERRORS=$((ERRORS + 1))
-        fi
-    fi
-fi
-
-# Try Telegram
-if [[ -f "$TELEGRAM_ACTIVE_FILE" ]]; then
-    CHAT_ID="$(cat "$TELEGRAM_ACTIVE_FILE")"
-    if [[ -n "$CHAT_ID" ]]; then
-        if "$SCRIPT_DIR/send_tg" "$MESSAGE"; then
-            SENT=$((SENT + 1))
-        else
-            ERRORS=$((ERRORS + 1))
-        fi
-    fi
-fi
-
-if [[ $SENT -eq 0 ]]; then
-    if [[ $ERRORS -gt 0 ]]; then
-        echo "send_msg: all channel sends failed" >&2
-        exit 1
+    DISCORD_CHANNEL="$(cat "$DISCORD_ACTIVE_FILE")"
+    if [[ -f "$DISCORD_TS_FILE" ]]; then
+        DISCORD_TS="$(cat "$DISCORD_TS_FILE")"
     else
-        echo "send_msg: no active channel (no inbound message received yet on any channel)" >&2
-        exit 1
+        DISCORD_TS="$(stat -c %Y "$DISCORD_ACTIVE_FILE" 2>/dev/null || echo 0)"
     fi
 fi
 
-exit 0
+if [[ -f "$TELEGRAM_ACTIVE_FILE" ]]; then
+    TELEGRAM_CHAT="$(cat "$TELEGRAM_ACTIVE_FILE")"
+    if [[ -f "$TELEGRAM_TS_FILE" ]]; then
+        TELEGRAM_TS="$(cat "$TELEGRAM_TS_FILE")"
+    else
+        TELEGRAM_TS="$(stat -c %Y "$TELEGRAM_ACTIVE_FILE" 2>/dev/null || echo 0)"
+    fi
+fi
+
+if [[ -z "$DISCORD_CHANNEL" && -z "$TELEGRAM_CHAT" ]]; then
+    echo "send_msg: no active channel (no inbound message received yet on any channel)" >&2
+    exit 1
+fi
+
+# Use whichever channel received a message most recently
+if [[ -n "$DISCORD_CHANNEL" && -n "$TELEGRAM_CHAT" ]]; then
+    if [[ "$DISCORD_TS" -ge "$TELEGRAM_TS" ]]; then
+        "$SCRIPT_DIR/send_discord" "$MESSAGE"
+    else
+        "$SCRIPT_DIR/send_tg" "$MESSAGE"
+    fi
+elif [[ -n "$DISCORD_CHANNEL" ]]; then
+    "$SCRIPT_DIR/send_discord" "$MESSAGE"
+else
+    "$SCRIPT_DIR/send_tg" "$MESSAGE"
+fi
