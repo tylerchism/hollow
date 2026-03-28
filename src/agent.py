@@ -216,12 +216,19 @@ class AgentRunner:
 
         try:
             summary = ""
+
+            async def _compaction_stream():
+                yield {
+                    "type": "user",
+                    "message": {"role": "user", "content": compaction_prompt},
+                }
+
             options = ClaudeCodeOptions(
                 model="claude-haiku-4-5",
                 max_turns=1,
                 permission_mode="bypassPermissions",
             )
-            async for msg in query(prompt=compaction_prompt, options=options):
+            async for msg in query(prompt=_compaction_stream(), options=options):
                 if isinstance(msg, AssistantMessage):
                     for block in msg.content:
                         if isinstance(block, TextBlock):
@@ -311,7 +318,14 @@ class AgentRunner:
         # 4. Build prompt with history
         prompt = self._build_prompt(messages, message)
 
-        # 5. Call Claude Code SDK
+        # 5. Call Claude Code SDK — use streaming input mode to avoid
+        #    Linux MAX_ARG_STRLEN (128 KB) limit on individual CLI arguments.
+        async def _prompt_stream():
+            yield {
+                "type": "user",
+                "message": {"role": "user", "content": prompt},
+            }
+
         options = ClaudeCodeOptions(
             system_prompt=context,
             max_turns=MAX_TOOL_ROUNDS,
@@ -322,7 +336,7 @@ class AgentRunner:
 
         reply_text = ""
         try:
-            async for msg in query(prompt=prompt, options=options):
+            async for msg in query(prompt=_prompt_stream(), options=options):
                 if isinstance(msg, AssistantMessage):
                     for block in msg.content:
                         if isinstance(block, TextBlock):
