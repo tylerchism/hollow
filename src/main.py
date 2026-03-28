@@ -221,8 +221,16 @@ def check_setup(config, require_telegram: bool = True) -> list[str]:
 
 async def _send_startup_notification(config, agent, bot, discord_bot) -> None:
     """On restart: review recent context per-channel and proactively continue work."""
-    # Wait for Discord to fully connect before sending
-    await asyncio.sleep(8)
+    # Wait for Discord to fully connect before sending.
+    # If Discord is enabled, wait for on_ready to fire (up to 30s); otherwise
+    # fall back to a short sleep so Telegram still gets the notification promptly.
+    if discord_bot:
+        try:
+            await asyncio.wait_for(discord_bot._ready_event.wait(), timeout=30)
+        except asyncio.TimeoutError:
+            log.warning("Discord ready_event timed out after 30s — proceeding with startup notification anyway")
+    else:
+        await asyncio.sleep(8)
 
     ping = "I'm back — reviewing context and picking up where we left off..."
 

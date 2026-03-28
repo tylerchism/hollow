@@ -54,7 +54,7 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
-MAX_TOOL_ROUNDS = 25
+MAX_TOOL_ROUNDS = 50
 NATIVE_TOOLS = ["Bash", "Read", "Write", "Edit", "Glob", "Grep", "Agent", "WebSearch", "WebFetch"]
 HISTORY_CHAR_BUDGET = 500_000
 
