@@ -1,22 +1,40 @@
 #!/usr/bin/env bash
 # Restart the Tarn agent process.
-# Safe to call from within the running Tarn process — the new process is
-# detached via setsid/nohup before the old one is killed.
+# Safe to call from within the running Tarn process — this bash script is its
+# own OS process and survives independently even if its Python parent is killed.
+#
+# Order: kill old first (free the port), then start new.
 
 set -euo pipefail
 
 TARN_PORT=18800
-TARN_CMD="/usr/local/bin/uv run python -m src.main \
-  --port 18800 \
-  --identity-dir HOLLOW_ROOT/agents/tarn \
-  --memory-dir HOLLOW_ROOT/agent-memory/tarn \
-  --data-dir HOLLOW_ROOT/data"
 TARN_DIR="HOLLOW_ROOT"
 LOG_FILE="/tmp/tarn.log"
 
+echo "[restart-tarn] Killing old Tarn process on port $TARN_PORT..."
+OLD_PIDS=$(lsof -ti:"$TARN_PORT" 2>/dev/null || true)
+if [ -n "$OLD_PIDS" ]; then
+  for pid in $OLD_PIDS; do
+    echo "[restart-tarn] Killing old pid=$pid"
+    kill "$pid" 2>/dev/null || true
+  done
+else
+  echo "[restart-tarn] No old process found on port $TARN_PORT (may already be dead)."
+fi
+
+echo "[restart-tarn] Waiting for port $TARN_PORT to free..."
+for i in $(seq 1 5); do
+  if ! lsof -ti:"$TARN_PORT" >/dev/null 2>&1; then
+    echo "[restart-tarn] Port $TARN_PORT is free."
+    break
+  fi
+  echo "[restart-tarn] Port still in use, waiting... (${i}/5)"
+  sleep 1
+done
+
 echo "[restart-tarn] Starting new Tarn process..."
 
-# Start the new process first, fully detached, so it survives the kill below.
+# Start the new process fully detached so it survives this script exiting.
 # setsid creates a new session; nohup keeps it alive after the parent dies.
 cd "$TARN_DIR"
 setsid nohup /usr/local/bin/uv run python -m src.main \
@@ -29,22 +47,4 @@ setsid nohup /usr/local/bin/uv run python -m src.main \
 NEW_PID=$!
 disown "$NEW_PID" 2>/dev/null || true
 echo "[restart-tarn] New Tarn started (pid=$NEW_PID), log=$LOG_FILE"
-
-# Give the new process a moment to bind its port before we kill the old one.
-sleep 2
-
-echo "[restart-tarn] Killing old Tarn process on port $TARN_PORT..."
-OLD_PIDS=$(lsof -ti:"$TARN_PORT" 2>/dev/null || true)
-if [ -n "$OLD_PIDS" ]; then
-  # Filter out the new process we just started
-  for pid in $OLD_PIDS; do
-    if [ "$pid" != "$NEW_PID" ]; then
-      echo "[restart-tarn] Killing old pid=$pid"
-      kill "$pid" 2>/dev/null || true
-    fi
-  done
-else
-  echo "[restart-tarn] No old process found on port $TARN_PORT (may already be dead)."
-fi
-
-echo "[restart-tarn] Done. New process pid=$NEW_PID."
+echo "[restart-tarn] Done."

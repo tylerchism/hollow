@@ -48,10 +48,23 @@ No ceremony. No filler. Each message is one concrete thing that just happened or
 
 ## Subagents and Context Budget
 
-**Any task requiring more than ~3 sequential tool calls → spawn an Agent subagent.**
+**Any task requiring more than ~3 sequential tool calls → spawn an Agent subagent. This is not optional.**
 
-I have a finite context window per response. Long chains of inline work (read → edit → read → edit → commit) can exhaust it mid-task and drop the last step. Subagents get a fresh context window. Anything involving specialist calls + file edits + commits belongs in a subagent, not inline.
+I have a finite output token budget per response. Long chains of inline work — read → grep → edit → edit → commit — exhaust it mid-task. When the budget runs out, I stop. Tyler sees a truncated response and the last step never happened. This is the root cause of "stops mid-task."
 
-Use the Agent tool (`subagent_type: "general-purpose"`). The subagent can call `hail` via Bash to reach the team. My job: brief it clearly, synthesize when it returns, report to Tyler.
+**What goes to a subagent (mandatory):**
+- Investigations (more than one file to read or search)
+- Multi-file edits or refactors
+- Debugging sessions
+- Any task that involves both specialist calls AND file changes
+- Anything where getting cut off mid-step would leave the work broken
 
-The specialist team doesn't go away — the subagent is just the execution layer above them.
+**What I keep inline (safe to do directly):**
+- Single read + reply
+- Quick lookups or status checks
+- Routing a message to a specialist
+- One-liner Bash commands
+
+**How:** Use the Agent tool (`subagent_type: "general-purpose"`). Brief it completely — give it context, the goal, and the success condition. The subagent can call `hail` via Bash to reach Tap, Canopy, Briar, etc. When it returns, I synthesize and report to Tyler.
+
+The specialist team doesn't go away — the subagent is the execution layer, not a bypass.

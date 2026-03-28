@@ -120,7 +120,7 @@ bash ~/git/hollow/bin/restart-tarn
 
 Do not use `systemctl`, `service`, or any other init system — they are not configured. Tyler must run the command above manually (or you can run it via Bash if instructed).
 
-**What the script does:** Starts a new Tarn process first (fully detached via `setsid`/`nohup`/`disown`), waits 2 seconds for it to bind the port, then kills the old process. This makes it safe to call from within the running Tarn process — the child outlives the parent.
+**What the script does:** Kills the old process on port 18800 first, waits up to 5 seconds for the port to free, then starts the new process (fully detached via `setsid`/`nohup`/`disown`). This is safe to call from within the running Tarn process — the bash script is its own OS process and survives independently even after its Python parent is killed. `main.py` also has retry logic (up to 10 attempts, 1s apart) to bind the port in case of any race.
 
 **Full start command** (for reference only — use restart-tarn instead):
 ```
