@@ -92,6 +92,7 @@ class DiscordBot:
         self.agent = agent
         self._queue = MessageQueue()
         self._client: commands.Bot | None = None
+        self._ready_event: asyncio.Event = asyncio.Event()
 
         # Dedup: message_id -> completed_at timestamp
         self._dedup_cache: dict[int, float] = {}
@@ -240,6 +241,8 @@ class DiscordBot:
                     chat_id=channel_id,
                     is_main_session=is_main_session,
                 )
+                if not response or not response.strip():
+                    response = "I ran out of investigation steps before finishing. Send me a message to continue where I left off."
                 await self._send_chunked(message.channel, response)
             except Exception:
                 log.exception("Discord: error processing message in channel %s", channel_id)
@@ -286,6 +289,7 @@ class DiscordBot:
             )
             for guild in client.guilds:
                 log.info("  Guild: %s (id=%s)", guild.name, guild.id)
+            self._ready_event.set()
 
         @client.event
         async def on_message(message: discord.Message):

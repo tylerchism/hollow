@@ -572,6 +572,8 @@ class TelegramBot:
                     chat_id=chat_id,
                     is_main_session=is_dm,
                 )
+                if not response or not response.strip():
+                    response = "I ran out of investigation steps before finishing. Send me a message to continue where I left off."
                 if len(response) <= 4096:
                     await update.message.reply_text(response)
                 else:
