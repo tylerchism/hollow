@@ -30,14 +30,14 @@ If you update this file, tell Tyler.
 
 ## Talking to Tyler
 
-**Send interim messages throughout slow work — not just at the start.** narrate the work as it happens. One sentence per meaningful step, fired via `send_tg` each time:
+**Send interim messages throughout slow work — not just at the start.** narrate the work as it happens. One sentence per meaningful step, fired via `send_msg` each time (sends to whichever channel is currently active — Telegram, Discord, or both):
 
 ```bash
-send_tg "on it — pulling the current ticket state"
+send_msg "on it — pulling the current ticket state"
 # ...do the lookup...
-send_tg "got it — three blocked, asking Briar to review"
+send_msg "got it — three blocked, asking Briar to review"
 # ...hail briar...
-send_tg "Briar's back — updating the tickets now"
+send_msg "Briar's back — updating the tickets now"
 # ...edits/commit...
 # [final response with just the result]
 ```

@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+# send_msg — Send an interim message on whichever channel is currently active.
+#
+# Usage: send_msg "message text"
+#
+# Checks both /tmp/tarn_active_discord_channel (Discord) and
+# /tmp/tarn_active_chat_id (Telegram) and sends to whichever is set.
+# If both are set, sends to both.
+# If neither is set, exits with error.
+#
+# This is the unified interim-messaging script for soul.md.
+# Individual channel scripts (send_tg, send_discord) still work directly.
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+DISCORD_ACTIVE_FILE="/tmp/tarn_active_discord_channel"
+TELEGRAM_ACTIVE_FILE="/tmp/tarn_active_chat_id"
+
+if [[ $# -lt 1 ]]; then
+    echo "Usage: send_msg \"message text\"" >&2
+    exit 1
+fi
+
+MESSAGE="$*"
+
+SENT=0
+ERRORS=0
+
+# Try Discord
+if [[ -f "$DISCORD_ACTIVE_FILE" ]]; then
+    CHANNEL_ID="$(cat "$DISCORD_ACTIVE_FILE")"
+    if [[ -n "$CHANNEL_ID" ]]; then
+        if "$SCRIPT_DIR/send_discord" "$MESSAGE"; then
+            SENT=$((SENT + 1))
+        else
+            ERRORS=$((ERRORS + 1))
+        fi
+    fi
+fi
+
+# Try Telegram
+if [[ -f "$TELEGRAM_ACTIVE_FILE" ]]; then
+    CHAT_ID="$(cat "$TELEGRAM_ACTIVE_FILE")"
+    if [[ -n "$CHAT_ID" ]]; then
+        if "$SCRIPT_DIR/send_tg" "$MESSAGE"; then
+            SENT=$((SENT + 1))
+        else
+            ERRORS=$((ERRORS + 1))
+        fi
+    fi
+fi
+
+if [[ $SENT -eq 0 ]]; then
+    if [[ $ERRORS -gt 0 ]]; then
+        echo "send_msg: all channel sends failed" >&2
+        exit 1
+    else
+        echo "send_msg: no active channel (no inbound message received yet on any channel)" >&2
+        exit 1
+    fi
+fi
+
+exit 0

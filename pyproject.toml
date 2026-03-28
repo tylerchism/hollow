@@ -9,6 +9,7 @@ dependencies = [
     "aiosqlite>=0.21.0",
     "apscheduler>=3.11.0",
     "claude-code-sdk>=0.0.25",
+    "discord-py>=2.4.0",
     "python-dotenv>=1.2.2",
     "python-telegram-bot>=22.6",
 ]
