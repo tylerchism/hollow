@@ -339,10 +339,13 @@ async def run(args: argparse.Namespace = None):
     api_app = make_api_app(agent)
     api_runner = web.AppRunner(api_app)
     await api_runner.setup()
-    site = web.TCPSite(api_runner, config.api_host, config.api_port)
     _port_retries = 10
     for _attempt in range(1, _port_retries + 1):
         try:
+            # Re-create TCPSite each attempt: aiohttp registers the site in the
+            # runner before the actual TCP bind, so a failed start() leaves a
+            # stale registration that would raise RuntimeError on retry.
+            site = web.TCPSite(api_runner, config.api_host, config.api_port)
             await site.start()
             break
         except OSError as _e:
@@ -352,6 +355,8 @@ async def run(args: argparse.Namespace = None):
                 "Port %d not yet free (%s), retrying %d/%d...",
                 config.api_port, _e, _attempt, _port_retries,
             )
+            # Un-register the failed site so the next attempt can create a fresh one
+            api_runner._sites.discard(site)  # type: ignore[attr-defined]
             await asyncio.sleep(1)
     log.info("HTTP API listening on http://%s:%d", config.api_host, config.api_port)
 
