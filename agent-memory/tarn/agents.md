@@ -133,6 +133,8 @@ Do not use `systemctl`, `service`, or any other init system — they are not con
 
 `_send_startup_notification` in `main.py` fires automatically on restart — no need to add any notification logic to the restart script.
 
+**Restart window:** The restart takes roughly 10–15 seconds (kill → port free → new process up → Discord ready). Any message that arrives during that window will be dropped cleanly — no error is sent to the user. Silence is intentional. The startup notification ("I'm back...") is the signal that the new process is live.
+
 ---
 
 ## Agent Tool — When to Use It
