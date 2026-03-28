@@ -144,7 +144,7 @@ def setup_scheduler(
                 if _notify and bot and agent.config.heartbeat_chat_id:
                     await bot.send_message(agent.config.heartbeat_chat_id, response)
 
-                if discord_bot and (_notify_discord or _discord_channel_name):
+                if discord_bot and discord_bot._client and (_notify_discord or _discord_channel_name):
                     if _discord_channel_name:
                         # Try to post to the named channel on every guild
                         sent_any = False
@@ -190,31 +190,12 @@ def check_setup(config, require_telegram: bool = True) -> list[str]:
 
 
 async def _send_startup_notification(config, agent, bot, discord_bot) -> None:
-    """On restart: review recent context and proactively continue work — don't just say 'I'm back'."""
+    """On restart: review recent context per-channel and proactively continue work."""
     # Wait for Discord to fully connect before sending
     await asyncio.sleep(8)
 
-    # Use the heartbeat chat_id (Tyler's main session) so we read the right conversation history
-    chat_id = str(config.heartbeat_chat_id) if config.heartbeat_chat_id else "telegram_main"
+    ping = "I'm back — reviewing context and picking up where we left off..."
 
-    async def broadcast(msg: str):
-        """Send msg to all active channels."""
-        if bot and config.heartbeat_chat_id:
-            try:
-                await bot.send_message(config.heartbeat_chat_id, msg)
-            except Exception:
-                log.exception("Failed to send Telegram startup message")
-        if discord_bot and discord_bot._client:
-            try:
-                for guild in discord_bot._client.guilds:
-                    await discord_bot.send_to_named_channel(guild, "tarn", msg)
-            except Exception:
-                log.exception("Failed to send Discord startup message")
-
-    # Let Tyler know we're alive immediately
-    await broadcast("I'm back — reviewing context and picking up where we left off...")
-
-    # Now actually do the work: read recent history, understand what was in progress, continue
     startup_prompt = (
         "I just restarted. Review our recent conversation history and the current Mission Control "
         "task state to understand what we were working on. Then:\n"
@@ -225,17 +206,55 @@ async def _send_startup_notification(config, agent, bot, discord_bot) -> None:
         "Be proactive. Tyler should not have to re-prompt you to continue."
     )
 
-    try:
-        response = await agent.reply(
-            message=startup_prompt,
-            chat_id=chat_id,
-            is_main_session=True,
-        )
-        if response and response.strip():
-            await broadcast(response)
-    except Exception:
-        log.exception("Failed to run startup context review")
-        await broadcast("I'm back — ready to continue. What are we working on?")
+    # ── Telegram ──────────────────────────────────────────────────────────────
+    if bot and config.heartbeat_chat_id:
+        tg_chat_id = str(config.heartbeat_chat_id)
+        try:
+            await bot.send_message(config.heartbeat_chat_id, ping)
+        except Exception:
+            log.exception("Failed to send Telegram startup ping")
+        try:
+            response = await agent.reply(
+                message=startup_prompt,
+                chat_id=tg_chat_id,
+                is_main_session=True,
+            )
+            if response and response.strip():
+                await bot.send_message(config.heartbeat_chat_id, response)
+        except Exception:
+            log.exception("Failed to run Telegram startup context review")
+            try:
+                await bot.send_message(
+                    config.heartbeat_chat_id,
+                    "I'm back — ready to continue. What are we working on?",
+                )
+            except Exception:
+                pass
+
+    # ── Discord ───────────────────────────────────────────────────────────────
+    if discord_bot and discord_bot._client:
+        for discord_chat_id, tarn_channel in discord_bot.get_tarn_chat_ids():
+            try:
+                await discord_bot._send_chunked(tarn_channel, ping)
+            except Exception:
+                log.exception("Failed to send Discord startup ping to channel %s", discord_chat_id)
+            try:
+                response = await agent.reply(
+                    message=startup_prompt,
+                    chat_id=discord_chat_id,
+                    is_main_session=True,
+                )
+                if response and response.strip():
+                    await discord_bot._send_chunked(tarn_channel, response)
+            except Exception:
+                log.exception("Failed to run Discord startup context review for channel %s", discord_chat_id)
+                try:
+                    await discord_bot._send_chunked(
+                        tarn_channel,
+                        "I'm back — ready to continue. What are we working on?",
+                    )
+                except Exception:
+                    pass
 
 
 async def run(args: argparse.Namespace = None):
