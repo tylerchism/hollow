@@ -356,7 +356,10 @@ async def run(args: argparse.Namespace = None):
                 config.api_port, _e, _attempt, _port_retries,
             )
             # Un-register the failed site so the next attempt can create a fresh one
-            api_runner._sites.discard(site)  # type: ignore[attr-defined]
+            try:
+                api_runner._sites.remove(site)  # type: ignore[attr-defined]
+            except (ValueError, AttributeError):
+                pass
             await asyncio.sleep(1)
     log.info("HTTP API listening on http://%s:%d", config.api_host, config.api_port)
 
