@@ -1,20 +1,18 @@
 #!/usr/bin/env python3
 """Analyze a tweet (including video) via xAI/Grok's native X platform access.
 
+Grok has native X platform integration — it can pull the actual video from X,
+extract frames, pull subtitles/captions, and generate a speech-to-text transcript.
+This is the same capability as using Grok on x.com directly.
+
 Usage:
   xtv "https://x.com/user/status/12345"
   xtv "https://x.com/user/status/12345" --prompt "What is being said in the video?"
-
-Grok has native X platform access via the web_search tool, which lets it read
-tweet content and video. This is different from the vision API (which only accepts
-direct image files). If video transcript is needed, yt-dlp + whisper is required.
 """
 
 import json
 import os
 import sys
-import urllib.error
-import urllib.request
 from pathlib import Path
 
 
@@ -57,7 +55,6 @@ def main():
         sys.exit(1)
 
     if custom_prompt:
-        # Always embed the tweet URL in custom prompts if not already present
         if tweet_url not in custom_prompt:
             prompt = f"Tweet URL: {tweet_url}\n\n{custom_prompt}"
         else:
@@ -69,36 +66,51 @@ def main():
             "1. The full text of the tweet\n"
             "2. Who posted it and any relevant context about them\n"
             "3. If there is a video or image, provide a complete verbatim transcript of all spoken words "
-            "and describe what is shown in detail\n"
+            "and describe what is shown visually in detail\n"
             "4. The core message or argument being made — including any philosophical, spiritual, or "
             "ideological points the speaker makes\n"
             "5. Any relevant replies or quote tweets if notable"
         )
 
-    payload = json.dumps({
-        "model": "grok-4-1-fast",
-        "input": [
-            {
-                "role": "system",
-                "content": (
-                    "You have native access to X/Twitter content. When given a tweet URL, "
-                    "retrieve and analyze the full tweet including any video or image content. "
-                    "For videos, describe what is shown and transcribe any spoken words as accurately as possible."
-                ),
-            },
-            {"role": "user", "content": prompt},
-        ],
-        "tools": [{"type": "web_search"}],
-    }).encode()
-
-    req = urllib.request.Request(ENDPOINT, data=payload)
-    req.add_header("Content-Type", "application/json")
-    req.add_header("Authorization", f"Bearer {API_KEY}")
-    req.add_header("User-Agent", "hollow-xtv/1.0")
+    try:
+        import httpx
+    except ImportError:
+        print("Error: httpx not installed. Run: uv add httpx", file=sys.stderr)
+        sys.exit(1)
 
     try:
-        with urllib.request.urlopen(req, timeout=90) as resp:
-            data = json.loads(resp.read().decode())
+        with httpx.Client() as client:
+            resp = client.post(
+                ENDPOINT,
+                headers={
+                    "Authorization": f"Bearer {API_KEY}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": "grok-4-1-fast",
+                    "input": [
+                        {
+                            "role": "system",
+                            "content": (
+                                "You have native access to X/Twitter content including videos. "
+                                "When given a tweet URL, retrieve and analyze the full tweet. "
+                                "For videos: pull the actual video, extract frames, use subtitles/captions "
+                                "if available, and generate an accurate speech-to-text transcript. "
+                                "Transcribe all spoken words as accurately as possible."
+                            ),
+                        },
+                        {"role": "user", "content": prompt},
+                    ],
+                    "tools": [{"type": "web_search"}],
+                },
+                timeout=120,
+            )
+
+            if resp.status_code != 200:
+                print(f"API error {resp.status_code}: {resp.text[:500]}", file=sys.stderr)
+                sys.exit(1)
+
+            data = resp.json()
             output = data.get("output", [])
             for item in output:
                 if item.get("type") == "message":
@@ -113,11 +125,8 @@ def main():
                                         print(f"  {a.get('title', 'Untitled')}: {a.get('url', '')}")
             if not output:
                 print(json.dumps(data, indent=2))
-    except urllib.error.HTTPError as e:
-        body = e.read().decode() if e.fp else ""
-        print(f"API error {e.code}: {body}", file=sys.stderr)
-        sys.exit(1)
-    except urllib.error.URLError as e:
+
+    except httpx.RequestError as e:
         print(f"Connection error: {e}", file=sys.stderr)
         sys.exit(1)
 
