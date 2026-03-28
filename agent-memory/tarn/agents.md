@@ -107,6 +107,27 @@ Note: The `mc activity log` CLI accepts a plain string — format it as shown ab
 
 ---
 
+## Self-Restart
+
+Tarn runs as a persistent background process. There is no systemd service.
+
+**Start command:**
+```
+/usr/local/bin/uv run python -m src.main \
+  --port 18800 \
+  --identity-dir HOLLOW_ROOT/agents/tarn \
+  --memory-dir HOLLOW_ROOT/agent-memory/tarn \
+  --data-dir HOLLOW_ROOT/data
+```
+
+**To restart:** `bash ~/git/hollow/bin/restart-tarn`
+
+The script starts the new process first (fully detached via `setsid`/`nohup`/`disown`), then kills the old one — so calling it from within the running Tarn process is safe: the child outlives the parent.
+
+`_send_startup_notification` in `main.py` fires automatically on restart — no need to add any notification logic to the restart script.
+
+---
+
 ## Agent Tool — When to Use It
 
 The Agent tool spawns a general-purpose subagent with its own context window. Use it for execution-heavy orchestration, NOT as a replacement for the specialist team.
