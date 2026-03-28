@@ -103,6 +103,13 @@ class DiscordBot:
             int(u.strip()) for u in allowed_raw.split(",") if u.strip()
         }
 
+        # Owner Discord user ID (loaded from DISCORD_OWNER_ID env var).
+        # When set, the owner can message the bot in any channel and get a
+        # response — channel gating (#tarn / DM / mention) is bypassed for
+        # this user only.
+        owner_raw = os.getenv("DISCORD_OWNER_ID", "").strip()
+        self._owner_id: int | None = int(owner_raw) if owner_raw else None
+
     # ─── Dedup ───────────────────────────────────────────────────────────────
 
     def _is_duplicate(self, message_id: int) -> bool:
@@ -311,7 +318,11 @@ class DiscordBot:
                 and message.reference.resolved.author == client.user
             )
 
-            should_respond = is_dm or is_tarn_channel or is_mentioned or is_reply_to_bot
+            # Owner bypass: if DISCORD_OWNER_ID is set and matches the
+            # message author, respond regardless of channel.
+            is_owner = self._owner_id is not None and user_id == self._owner_id
+
+            should_respond = is_dm or is_tarn_channel or is_mentioned or is_reply_to_bot or is_owner
             if not should_respond:
                 return
 
