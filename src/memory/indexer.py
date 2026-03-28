@@ -130,10 +130,21 @@ class Indexer:
             "end_line": parts[-1]["end_line"],
         }
 
-    def _upsert_file(self, path: Path, content_hash: str, chunks: list[dict]):
-        """Transaction: delete old data, insert new chunks and file record."""
+    def _upsert_file(
+        self,
+        path: Path,
+        content_hash: str,
+        chunks: list[dict],
+        metadata: dict | None = None,
+    ):
+        """Transaction: delete old data, insert new chunks and file record.
+
+        metadata may contain any subset of: person, platform, source_type,
+        source_title, source_url, date — all stored flat on every chunk.
+        """
         path_str = str(path)
         now = datetime.now(timezone.utc).isoformat()
+        meta = metadata or {}
 
         with self.conn:
             self.conn.execute("DELETE FROM chunks WHERE file_path = ?", (path_str,))
@@ -147,9 +158,23 @@ class Indexer:
             for chunk in chunks:
                 chunk_hash = hashlib.sha256(chunk["text"].encode()).hexdigest()
                 self.conn.execute(
-                    """INSERT INTO chunks (file_path, start_line, end_line, text, content_hash)
-                    VALUES (?, ?, ?, ?, ?)""",
-                    (path_str, chunk["start_line"], chunk["end_line"], chunk["text"], chunk_hash),
+                    """INSERT INTO chunks
+                        (file_path, start_line, end_line, text, content_hash,
+                         person, platform, source_type, source_title, source_url, date)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        path_str,
+                        chunk["start_line"],
+                        chunk["end_line"],
+                        chunk["text"],
+                        chunk_hash,
+                        meta.get("person"),
+                        meta.get("platform"),
+                        meta.get("source_type"),
+                        meta.get("source_title"),
+                        meta.get("source_url"),
+                        meta.get("date"),
+                    ),
                 )
 
     async def _embed_new_chunks(self):
@@ -205,8 +230,17 @@ class Indexer:
 
         self.conn.commit()
 
-    async def index_file(self, path: Path, force: bool = False) -> bool:
-        """Index a single file. Returns True if file was (re)indexed."""
+    async def index_file(
+        self,
+        path: Path,
+        force: bool = False,
+        metadata: dict | None = None,
+    ) -> bool:
+        """Index a single file. Returns True if file was (re)indexed.
+
+        metadata may carry: person, platform, source_type, source_title,
+        source_url, date — stored flat on every chunk for this file.
+        """
         if not path.exists():
             return False
 
@@ -216,7 +250,7 @@ class Indexer:
 
         text = path.read_text(encoding="utf-8")
         chunks = self._chunk_markdown(text)
-        self._upsert_file(path, content_hash, chunks)
+        self._upsert_file(path, content_hash, chunks, metadata=metadata)
         return True
 
     async def index_all(self, force: bool = False) -> IndexResult:

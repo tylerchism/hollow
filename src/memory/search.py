@@ -27,6 +27,12 @@ class SearchResult:
     score: float
     keyword_score: float
     vector_score: float
+    person: str | None = None
+    platform: str | None = None
+    source_type: str | None = None
+    source_title: str | None = None
+    source_url: str | None = None
+    date: str | None = None
 
 
 class Searcher:
@@ -57,6 +63,8 @@ class Searcher:
             rows = self.conn.execute(
                 """
                 SELECT c.id, c.file_path, c.start_line, c.end_line, c.text,
+                       c.person, c.platform, c.source_type, c.source_title,
+                       c.source_url, c.date,
                        rank AS bm25_score
                 FROM chunks_fts fts
                 JOIN chunks c ON c.id = fts.rowid
@@ -77,6 +85,12 @@ class Searcher:
                 "start_line": row["start_line"],
                 "end_line": row["end_line"],
                 "text": row["text"],
+                "person": row["person"],
+                "platform": row["platform"],
+                "source_type": row["source_type"],
+                "source_title": row["source_title"],
+                "source_url": row["source_url"],
+                "date": row["date"],
                 "score": -row["bm25_score"],
             }
             for row in rows
@@ -94,7 +108,9 @@ class Searcher:
             return []
 
         rows = self.conn.execute(
-            "SELECT id, file_path, start_line, end_line, text, embedding FROM chunks WHERE embedding IS NOT NULL"
+            """SELECT id, file_path, start_line, end_line, text, embedding,
+                      person, platform, source_type, source_title, source_url, date
+               FROM chunks WHERE embedding IS NOT NULL"""
         ).fetchall()
 
         if not rows:
@@ -111,6 +127,12 @@ class Searcher:
                     "start_line": row["start_line"],
                     "end_line": row["end_line"],
                     "text": row["text"],
+                    "person": row["person"],
+                    "platform": row["platform"],
+                    "source_type": row["source_type"],
+                    "source_title": row["source_title"],
+                    "source_url": row["source_url"],
+                    "date": row["date"],
                     "score": sim,
                 }
             )
@@ -164,6 +186,12 @@ class Searcher:
                     score=combined,
                     keyword_score=item["keyword_score"],
                     vector_score=item["vector_score"],
+                    person=item.get("person"),
+                    platform=item.get("platform"),
+                    source_type=item.get("source_type"),
+                    source_title=item.get("source_title"),
+                    source_url=item.get("source_url"),
+                    date=item.get("date"),
                 )
             )
 
