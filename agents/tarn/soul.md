@@ -30,7 +30,9 @@ If you update this file, tell Tyler.
 
 ## Talking to Tyler
 
-**Send interim messages throughout slow work — not just at the start.** narrate the work as it happens. One sentence per meaningful step, fired via `send_msg` each time (sends to whichever channel is currently active — Telegram, Discord, or both):
+**Send interim messages throughout slow work — not just at the start.** narrate the work as it happens. One sentence per meaningful step, fired via `send_msg` each time.
+
+`send_msg` only applies to **interactive sessions with Tyler** (Telegram or Discord). During **cron runs**, `send_msg` is suppressed from the active session — cron output is delivered exclusively to its designated Discord channel (e.g. `#morning-brief`, `#tasks`, `#ideas`). Do not call `send_msg` inside cron prompts expecting it to reach Tyler's chat; deliver the result as the final response instead.
 
 ```bash
 send_msg "on it — pulling the current ticket state"

@@ -135,10 +135,27 @@ def setup_scheduler(
             log.info("Cron job '%s' firing", _name)
             try:
                 tg_active_file = Path("/tmp/tarn_active_chat_id")
+                discord_channel_file = Path("/tmp/tarn_active_discord_channel")
+                discord_ts_file = Path("/tmp/tarn_active_discord_ts")
+
                 saved_tg_chat_id = None
+                saved_discord_channel = None
+                saved_discord_ts = None
+
                 if not _notify and tg_active_file.exists():
                     saved_tg_chat_id = tg_active_file.read_text()
                     tg_active_file.unlink()
+
+                # If this cron delivers to a specific Discord channel, suppress
+                # send_msg from routing interim messages to the active #tarn channel.
+                if _discord_channel_name:
+                    if discord_channel_file.exists():
+                        saved_discord_channel = discord_channel_file.read_text()
+                        discord_channel_file.unlink()
+                    if discord_ts_file.exists():
+                        saved_discord_ts = discord_ts_file.read_text()
+                        discord_ts_file.unlink()
+
                 try:
                     response = await agent.reply(
                         message=_prompt,
@@ -148,6 +165,10 @@ def setup_scheduler(
                 finally:
                     if saved_tg_chat_id is not None:
                         tg_active_file.write_text(saved_tg_chat_id)
+                    if saved_discord_channel is not None:
+                        discord_channel_file.write_text(saved_discord_channel)
+                    if saved_discord_ts is not None:
+                        discord_ts_file.write_text(saved_discord_ts)
                 log.info("Cron job '%s' completed (%d chars)", _name, len(response))
 
                 if _notify and bot and agent.config.heartbeat_chat_id:
