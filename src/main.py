@@ -20,13 +20,41 @@ from src.memory import MemoryManager
 log = logging.getLogger(__name__)
 
 
-def make_api_app(agent: AgentRunner) -> web.Application:
+def make_api_app(
+    agent: AgentRunner,
+    bot: "TelegramBot | None" = None,
+    discord_bot: "DiscordBot | None" = None,
+) -> web.Application:
     """Create the aiohttp app for the HTTP API."""
 
     async def handle_health(request: web.Request) -> web.Response:
         cfg = agent.config
         agent_name = cfg.identity_dir.name if cfg.identity_dir else "hollow"
-        return web.json_response({"status": "ok", "agent": agent_name})
+
+        bots: dict[str, bool] = {}
+        if bot is not None:
+            try:
+                bots["telegram"] = bool(
+                    bot.app.updater and bot.app.updater.running
+                )
+            except Exception:
+                bots["telegram"] = False
+        if discord_bot is not None:
+            try:
+                bots["discord"] = bool(
+                    discord_bot._client and discord_bot._client.is_ready()
+                )
+            except Exception:
+                bots["discord"] = False
+
+        # If any configured bot failed to start, report degraded
+        if bots and not all(bots.values()):
+            return web.json_response({"status": "degraded", "agent": agent_name, "bots": bots})
+
+        payload: dict = {"status": "ok", "agent": agent_name}
+        if bots:
+            payload["bots"] = bots
+        return web.json_response(payload)
 
     async def handle_ask(request: web.Request) -> web.Response:
         try:
@@ -354,7 +382,7 @@ async def run(args: argparse.Namespace = None):
     scheduler = setup_scheduler(agent, bot, crons, config.user_timezone, discord_bot=discord_bot)
 
     # Set up HTTP API
-    api_app = make_api_app(agent)
+    api_app = make_api_app(agent, bot=bot, discord_bot=discord_bot)
     api_runner = web.AppRunner(api_app)
     await api_runner.setup()
     _port_retries = 10
@@ -400,7 +428,7 @@ async def run(args: argparse.Namespace = None):
 
         if discord_bot:
             # discord.py's start() runs until close() is called — run as background task
-            discord_task = asyncio.create_task(discord_bot.start())
+            discord_task = asyncio.create_task(discord_bot.start(token=config.discord_bot_token))
             log.info("Discord bot starting (background task)")
 
         scheduler.start()

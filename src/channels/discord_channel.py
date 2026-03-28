@@ -266,9 +266,9 @@ class DiscordBot:
 
     # ─── Bot setup and event handlers ─────────────────────────────────────────
 
-    async def start(self) -> None:
+    async def start(self, token: str | None = None) -> None:
         """Build the discord.py bot and connect."""
-        token = os.getenv("DISCORD_BOT_TOKEN", "")
+        token = token or self.config.discord_bot_token or os.getenv("DISCORD_BOT_TOKEN", "")
         if not token:
             raise RuntimeError("DISCORD_BOT_TOKEN is not set")
 
@@ -407,6 +407,11 @@ class DiscordBot:
         # Start the bot (blocks until stopped via close())
         log.info("Starting Discord bot...")
         await client.start(token)
+
+    @property
+    def is_running(self) -> bool:
+        """True if the bot has connected to Discord (on_ready has fired)."""
+        return self._client is not None and self._ready_event.is_set()
 
     async def stop(self) -> None:
         """Graceful shutdown."""
