@@ -40,10 +40,20 @@ class Config:
     history_char_budget: int = 500_000
 
 
-def load_config() -> Config:
-    """Load configuration from env vars and .env file."""
+def load_config(env_path: Path | None = None) -> Config:
+    """Load configuration from env vars and .env file.
+
+    Args:
+        env_path: Optional path to an agent-specific .env file (e.g.
+            agents/tarn/.env).  Loaded *after* the root .env so agent
+            values override defaults.  Pass this when --identity-dir is
+            known at startup so the Config object is fully populated
+            before it is constructed — no post-hoc field patching needed.
+    """
     project_root = Path(__file__).parent.parent
     load_dotenv(project_root / ".env")
+    if env_path is not None and Path(env_path).exists():
+        load_dotenv(env_path, override=True)
 
     config = Config(
         telegram_bot_token=os.getenv("TELEGRAM_BOT_TOKEN", ""),

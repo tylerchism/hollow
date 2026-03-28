@@ -280,6 +280,7 @@ class AgentRunner:
         chat_id: str,
         is_main_session: bool = True,
         context_injection: str = "",
+        allowed_tools: list[str] | None = None,
     ) -> str:
         """Process a user message and return the assistant's response.
 
@@ -290,6 +291,9 @@ class AgentRunner:
             context_injection: Optional context from a delegating agent (e.g. Tarn
                 passing conversation background to a sub-agent). Appended to the
                 system prompt inside <delegation_context> tags.
+            allowed_tools: Override the default NATIVE_TOOLS allowlist for this
+                call.  Pass a restricted list to block dangerous tools (e.g.
+                exclude Bash during read-only startup sequences).
         """
         # 0. Run compaction if history is too large (before adding new message)
         try:
@@ -331,7 +335,7 @@ class AgentRunner:
             max_turns=MAX_TOOL_ROUNDS,
             model=self._model_id(),
             permission_mode="bypassPermissions",
-            allowed_tools=NATIVE_TOOLS,
+            allowed_tools=allowed_tools if allowed_tools is not None else NATIVE_TOOLS,
         )
 
         reply_text = ""
@@ -353,7 +357,11 @@ class AgentRunner:
             if reply_text:
                 log.debug("SDK stream ended with error (response already received): %s", e)
             else:
-                log.error("Claude Code SDK query failed: %s", e)
+                log.error(
+                    "Claude Code SDK query failed: [%s] %s",
+                    type(e).__name__,
+                    e or "(empty message)",
+                )
                 reply_text = "Sorry, I encountered an error processing your message."
 
         # 6. Persist assistant response

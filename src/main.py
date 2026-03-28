@@ -249,6 +249,11 @@ def check_setup(config, require_telegram: bool = True) -> list[str]:
 
 async def _send_startup_notification(config, agent, bot, discord_bot) -> None:
     """On restart: review recent context per-channel and proactively continue work."""
+    # Startup is a read-only context review — block Bash so the agent cannot
+    # execute shell commands (restart-tarn, kill, pkill, etc.) while booting.
+    from src.agent import NATIVE_TOOLS
+    STARTUP_ALLOWED_TOOLS = [t for t in NATIVE_TOOLS if t != "Bash"]
+
     # Wait for Discord to fully connect before sending.
     # If Discord is enabled, wait for on_ready to fire (up to 30s); otherwise
     # fall back to a short sleep so Telegram still gets the notification promptly.
@@ -269,7 +274,11 @@ async def _send_startup_notification(config, agent, bot, discord_bot) -> None:
         "2. If there was active work in progress, continue it — don't wait to be re-prompted\n"
         "3. If nothing was actively in progress, just confirm you're up and note any pending "
         "decisions or blocked tasks that need attention\n\n"
-        "Be proactive. Tyler should not have to re-prompt you to continue."
+        "Be proactive. Tyler should not have to re-prompt you to continue.\n\n"
+        "CRITICAL: Do NOT run restart-tarn or any self-restart commands during this startup "
+        "sequence. You literally just restarted — calling restart-tarn now would kill this "
+        "process and create an infinite restart loop. If the previous conversation was about "
+        "restart issues, just summarize the status — do not attempt to fix it by restarting again."
     )
 
     # ── Telegram ──────────────────────────────────────────────────────────────
@@ -285,6 +294,7 @@ async def _send_startup_notification(config, agent, bot, discord_bot) -> None:
                     message=startup_prompt,
                     chat_id=tg_chat_id,
                     is_main_session=True,
+                    allowed_tools=STARTUP_ALLOWED_TOOLS,
                 ),
                 timeout=120,
             )
@@ -315,6 +325,7 @@ async def _send_startup_notification(config, agent, bot, discord_bot) -> None:
                         message=startup_prompt,
                         chat_id=discord_chat_id,
                         is_main_session=True,
+                        allowed_tools=STARTUP_ALLOWED_TOOLS,
                     ),
                     timeout=120,
                 )
@@ -335,7 +346,14 @@ async def _send_startup_notification(config, agent, bot, discord_bot) -> None:
 
 async def run(args: argparse.Namespace = None):
     """Main async entry point — HTTP API + Telegram bot + APScheduler."""
-    config = load_config()
+    # Resolve the agent-specific .env path early so load_config() can ingest
+    # it before constructing the Config object (avoids post-hoc field patching).
+    env_path = None
+    if args and args.identity_dir is not None:
+        candidate = args.identity_dir.resolve() / ".env"
+        if candidate.exists():
+            env_path = candidate
+    config = load_config(env_path=env_path)
     if args:
         apply_overrides(config, args)
 
@@ -474,25 +492,8 @@ def apply_overrides(config, args: argparse.Namespace) -> None:
         config.api_port = args.port
     if args.identity_dir is not None:
         config.identity_dir = args.identity_dir.resolve()
-        # Load agent-specific .env (e.g. agents/tarn/.env) so that
-        # TELEGRAM_BOT_TOKEN, DISCORD_BOT_TOKEN, etc. are picked up
-        # when launched via restart-tarn or the watchdog.
-        agent_env = config.identity_dir / ".env"
-        if agent_env.exists():
-            from dotenv import load_dotenv
-            load_dotenv(agent_env, override=True)
-            import os
-            config.telegram_bot_token = os.getenv("TELEGRAM_BOT_TOKEN", "")
-            config.discord_bot_token = os.getenv("DISCORD_BOT_TOKEN", "")
-            config.primary_model = os.getenv("PRIMARY_MODEL", config.primary_model)
-            hb = os.getenv("HEARTBEAT_CHAT_ID", "")
-            if hb:
-                config.heartbeat_chat_id = int(hb)
-            allowed = os.getenv("TELEGRAM_ALLOWED_USERS", "")
-            if allowed:
-                config.telegram_allowed_users = [
-                    int(uid.strip()) for uid in allowed.split(",") if uid.strip()
-                ]
+        # Agent-specific .env was already loaded by load_config(env_path=...)
+        # before the Config object was constructed — no field patching needed.
     if args.memory_dir is not None:
         config.memory_dir = args.memory_dir.resolve()
     if args.data_dir is not None:

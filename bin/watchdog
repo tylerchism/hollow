@@ -190,8 +190,8 @@ def try_restart(name: str, port: int, token: str | None = None, chat_id: int = T
         except Exception as e:
             log(f"  restart: restart-tarn failed: {e}")
             return False
-        # restart-tarn already waits 2s internally; wait 5s total to be sure
-        time.sleep(5)
+        # restart-tarn waits 2s internally; allow 15s total for bots to connect
+        time.sleep(15)
         healthy, detail, _ = ping_agent(name, port)
         if healthy:
             log(f"  restart: {name} is back up (via restart-tarn)")
