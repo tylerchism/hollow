@@ -11,26 +11,63 @@ TARN_PORT=18800
 TARN_DIR="HOLLOW_ROOT"
 LOG_FILE="/tmp/tarn.log"
 
-echo "[restart-tarn] Killing old Tarn process on port $TARN_PORT..."
+echo "[restart-tarn] Killing ALL old Tarn processes..."
+
+# Kill by port (process holding the socket)
 OLD_PIDS=$(lsof -ti:"$TARN_PORT" 2>/dev/null || true)
-if [ -n "$OLD_PIDS" ]; then
-  for pid in $OLD_PIDS; do
-    echo "[restart-tarn] Killing old pid=$pid"
+# Also kill any stale Tarn python processes by identity-dir pattern (handles processes
+# that were started but haven't bound to the port yet — the root cause of pile-up)
+PATTERN_PIDS=$(pgrep -f "identity-dir.*agents/tarn" 2>/dev/null || true)
+
+ALL_PIDS=$(echo "$OLD_PIDS $PATTERN_PIDS" | tr ' ' '\n' | sort -u | tr '\n' ' ')
+
+if [ -n "$(echo $ALL_PIDS | tr -d ' ')" ]; then
+  for pid in $ALL_PIDS; do
+    echo "[restart-tarn] Sending SIGTERM to pid=$pid"
     kill "$pid" 2>/dev/null || true
   done
 else
-  echo "[restart-tarn] No old process found on port $TARN_PORT (may already be dead)."
+  echo "[restart-tarn] No old Tarn processes found."
 fi
 
-echo "[restart-tarn] Waiting for port $TARN_PORT to free..."
+echo "[restart-tarn] Waiting up to 5s for port $TARN_PORT to free after SIGTERM..."
+PORT_FREE=0
 for i in $(seq 1 5); do
   if ! lsof -ti:"$TARN_PORT" >/dev/null 2>&1; then
     echo "[restart-tarn] Port $TARN_PORT is free."
+    PORT_FREE=1
     break
   fi
   echo "[restart-tarn] Port still in use, waiting... (${i}/5)"
   sleep 1
 done
+
+if [ "$PORT_FREE" -eq 0 ]; then
+  echo "[restart-tarn] Port still held after 5s — escalating to SIGKILL..."
+  REMAINING_PIDS=$(echo "$ALL_PIDS" | tr ' ' '\n' | tr '\n' ' ')
+  for pid in $REMAINING_PIDS; do
+    if kill -0 "$pid" 2>/dev/null; then
+      echo "[restart-tarn] Sending SIGKILL to pid=$pid"
+      kill -9 "$pid" 2>/dev/null || true
+    fi
+  done
+
+  echo "[restart-tarn] Waiting up to 5s for port $TARN_PORT to free after SIGKILL..."
+  for i in $(seq 1 5); do
+    if ! lsof -ti:"$TARN_PORT" >/dev/null 2>&1; then
+      echo "[restart-tarn] Port $TARN_PORT is free."
+      PORT_FREE=1
+      break
+    fi
+    echo "[restart-tarn] Port still in use, waiting... (${i}/5)"
+    sleep 1
+  done
+fi
+
+if [ "$PORT_FREE" -eq 0 ]; then
+  echo "[restart-tarn] ERROR: Port $TARN_PORT still in use after SIGKILL escalation. Aborting restart."
+  exit 1
+fi
 
 echo "[restart-tarn] Starting new Tarn process..."
 
