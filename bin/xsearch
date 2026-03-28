@@ -4,8 +4,6 @@
 import json
 import os
 import sys
-import urllib.error
-import urllib.request
 from pathlib import Path
 
 
@@ -45,23 +43,40 @@ def main():
         if arg.startswith("--count="):
             count = int(arg.split("=", 1)[1])
 
-    payload = json.dumps({
-        "model": "grok-4-1-fast",
-        "input": [
-            {"role": "system", "content": f"Search the web and return the top {count} results with sources. Be concise and factual."},
-            {"role": "user", "content": query},
-        ],
-        "tools": [{"type": "web_search"}],
-    }).encode()
-
-    req = urllib.request.Request(ENDPOINT, data=payload)
-    req.add_header("Content-Type", "application/json")
-    req.add_header("Authorization", f"Bearer {API_KEY}")
-    req.add_header("User-Agent", "hollow-xsearch/1.0")
+    if not API_KEY:
+        print("Error: XAI_API_KEY not set", file=sys.stderr)
+        sys.exit(1)
 
     try:
-        with urllib.request.urlopen(req, timeout=60) as resp:
-            data = json.loads(resp.read().decode())
+        import httpx
+    except ImportError:
+        print("Error: httpx not installed. Run: uv add httpx", file=sys.stderr)
+        sys.exit(1)
+
+    try:
+        with httpx.Client() as client:
+            resp = client.post(
+                ENDPOINT,
+                headers={
+                    "Authorization": f"Bearer {API_KEY}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": "grok-4-1-fast",
+                    "input": [
+                        {"role": "system", "content": f"Search the web and return the top {count} results with sources. Be concise and factual."},
+                        {"role": "user", "content": query},
+                    ],
+                    "tools": [{"type": "web_search"}],
+                },
+                timeout=60,
+            )
+
+            if resp.status_code != 200:
+                print(f"API error {resp.status_code}: {resp.text[:500]}", file=sys.stderr)
+                sys.exit(1)
+
+            data = resp.json()
             output = data.get("output", [])
             for item in output:
                 if item.get("type") == "message":
@@ -76,11 +91,8 @@ def main():
                                         print(f"  {a.get('title', 'Untitled')}: {a.get('url', '')}")
             if not output:
                 print(json.dumps(data, indent=2))
-    except urllib.error.HTTPError as e:
-        body = e.read().decode() if e.fp else ""
-        print(f"API error {e.code}: {body}", file=sys.stderr)
-        sys.exit(1)
-    except urllib.error.URLError as e:
+
+    except httpx.RequestError as e:
         print(f"Connection error: {e}", file=sys.stderr)
         sys.exit(1)
 
