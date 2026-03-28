@@ -189,30 +189,53 @@ def check_setup(config, require_telegram: bool = True) -> list[str]:
     return issues
 
 
-async def _send_startup_notification(config, bot, discord_bot) -> None:
-    """Fire an 'I'm back' notification on all available channels after a brief delay."""
-    # Wait a few seconds for Discord to fully connect before sending
-    await asyncio.sleep(5)
+async def _send_startup_notification(config, agent, bot, discord_bot) -> None:
+    """On restart: review recent context and proactively continue work — don't just say 'I'm back'."""
+    # Wait for Discord to fully connect before sending
+    await asyncio.sleep(8)
 
-    msg = "I'm back — restarted and ready. What are we working on?"
+    # Use the heartbeat chat_id (Tyler's main session) so we read the right conversation history
+    chat_id = str(config.heartbeat_chat_id) if config.heartbeat_chat_id else "telegram_main"
 
-    # Telegram: send to heartbeat_chat_id
-    if bot and config.heartbeat_chat_id:
-        try:
-            await bot.send_message(config.heartbeat_chat_id, msg)
-            log.info("Startup notification sent via Telegram")
-        except Exception:
-            log.exception("Failed to send Telegram startup notification")
+    async def broadcast(msg: str):
+        """Send msg to all active channels."""
+        if bot and config.heartbeat_chat_id:
+            try:
+                await bot.send_message(config.heartbeat_chat_id, msg)
+            except Exception:
+                log.exception("Failed to send Telegram startup message")
+        if discord_bot and discord_bot._client:
+            try:
+                for guild in discord_bot._client.guilds:
+                    await discord_bot.send_to_named_channel(guild, "tarn", msg)
+            except Exception:
+                log.exception("Failed to send Discord startup message")
 
-    # Discord: post to #tarn channel on every connected guild
-    if discord_bot and discord_bot._client:
-        try:
-            for guild in discord_bot._client.guilds:
-                sent = await discord_bot.send_to_named_channel(guild, "tarn", msg)
-                if sent:
-                    log.info("Startup notification sent to Discord #tarn in guild %s", guild.name)
-        except Exception:
-            log.exception("Failed to send Discord startup notification")
+    # Let Tyler know we're alive immediately
+    await broadcast("I'm back — reviewing context and picking up where we left off...")
+
+    # Now actually do the work: read recent history, understand what was in progress, continue
+    startup_prompt = (
+        "I just restarted. Review our recent conversation history and the current Mission Control "
+        "task state to understand what we were working on. Then:\n"
+        "1. Send a brief message (1-3 sentences) summarizing where things stand\n"
+        "2. If there was active work in progress, continue it — don't wait to be re-prompted\n"
+        "3. If nothing was actively in progress, just confirm you're up and note any pending "
+        "decisions or blocked tasks that need attention\n\n"
+        "Be proactive. Tyler should not have to re-prompt you to continue."
+    )
+
+    try:
+        response = await agent.reply(
+            message=startup_prompt,
+            chat_id=chat_id,
+            is_main_session=True,
+        )
+        if response and response.strip():
+            await broadcast(response)
+    except Exception:
+        log.exception("Failed to run startup context review")
+        await broadcast("I'm back — ready to continue. What are we working on?")
 
 
 async def run(args: argparse.Namespace = None):
@@ -296,9 +319,9 @@ async def run(args: argparse.Namespace = None):
         scheduler.start()
         log.info("APScheduler started with %d job(s)", len(scheduler.get_jobs()))
 
-        # Send startup notification so Tyler knows we're back up
+        # Send startup notification and proactively pick up where we left off
         asyncio.create_task(
-            _send_startup_notification(config, bot, discord_bot)
+            _send_startup_notification(config, agent, bot, discord_bot)
         )
 
         print("Hollow is running. Press Ctrl+C to stop.")
