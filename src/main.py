@@ -134,11 +134,20 @@ def setup_scheduler(
         ):
             log.info("Cron job '%s' firing", _name)
             try:
-                response = await agent.reply(
-                    message=_prompt,
-                    chat_id=_chat_id,
-                    is_main_session=_is_main,
-                )
+                tg_active_file = Path("/tmp/tarn_active_chat_id")
+                saved_tg_chat_id = None
+                if not _notify and tg_active_file.exists():
+                    saved_tg_chat_id = tg_active_file.read_text()
+                    tg_active_file.unlink()
+                try:
+                    response = await agent.reply(
+                        message=_prompt,
+                        chat_id=_chat_id,
+                        is_main_session=_is_main,
+                    )
+                finally:
+                    if saved_tg_chat_id is not None:
+                        tg_active_file.write_text(saved_tg_chat_id)
                 log.info("Cron job '%s' completed (%d chars)", _name, len(response))
 
                 if _notify and bot and agent.config.heartbeat_chat_id:
