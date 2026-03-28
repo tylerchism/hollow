@@ -93,6 +93,7 @@ class DiscordBot:
         self._queue = MessageQueue()
         self._client: commands.Bot | None = None
         self._ready_event: asyncio.Event = asyncio.Event()
+        self._shutting_down: bool = False
 
         # Dedup: message_id -> completed_at timestamp
         self._dedup_cache: dict[int, float] = {}
@@ -242,17 +243,25 @@ class DiscordBot:
                         chat_id=channel_id,
                         is_main_session=is_main_session,
                     ),
-                    timeout=300,
+                    timeout=900,
                 )
+                # Empty response can mean either genuinely no output OR the agent
+                # suppressed a shutdown error and returned "". In both cases, only
+                # send the fallback if we are NOT shutting down.
                 if not response or not response.strip():
-                    response = "I ran out of investigation steps before finishing. Send me a message to continue where I left off."
-                await self._send_chunked(message.channel, response)
+                    if not self._shutting_down:
+                        response = "I ran out of investigation steps before finishing. Send me a message to continue where I left off."
+                        await self._send_chunked(message.channel, response)
+                else:
+                    await self._send_chunked(message.channel, response)
             except asyncio.TimeoutError:
-                log.warning("Discord: agent.reply() timed out after 300s for channel %s", channel_id)
-                await message.channel.send("still working on this — taking longer than expected. I'll follow up when I have something.")
+                log.warning("Discord: agent.reply() timed out after 900s for channel %s", channel_id)
+                if not self._shutting_down:
+                    await message.channel.send("still on it...")
             except Exception:
                 log.exception("Discord: error processing message in channel %s", channel_id)
-                await message.channel.send("Something went wrong. Try again in a moment.")
+                if not self._shutting_down:
+                    await message.channel.send("Something went wrong. Try again in a moment.")
             finally:
                 done.set()
                 keepalive_task.cancel()
@@ -415,6 +424,7 @@ class DiscordBot:
 
     async def stop(self) -> None:
         """Graceful shutdown."""
+        self._shutting_down = True
         await self._queue.shutdown()
         if self._client:
             await self._client.close()
