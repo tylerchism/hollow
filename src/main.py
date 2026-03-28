@@ -252,13 +252,18 @@ async def _send_startup_notification(config, agent, bot, discord_bot) -> None:
         except Exception:
             log.exception("Failed to send Telegram startup ping")
         try:
-            response = await agent.reply(
-                message=startup_prompt,
-                chat_id=tg_chat_id,
-                is_main_session=True,
+            response = await asyncio.wait_for(
+                agent.reply(
+                    message=startup_prompt,
+                    chat_id=tg_chat_id,
+                    is_main_session=True,
+                ),
+                timeout=120,
             )
             if response and response.strip():
                 await bot.send_message(config.heartbeat_chat_id, response)
+        except asyncio.TimeoutError:
+            log.warning("Telegram startup context review timed out after 120s")
         except Exception:
             log.exception("Failed to run Telegram startup context review")
             try:
@@ -277,13 +282,18 @@ async def _send_startup_notification(config, agent, bot, discord_bot) -> None:
             except Exception:
                 log.exception("Failed to send Discord startup ping to channel %s", discord_chat_id)
             try:
-                response = await agent.reply(
-                    message=startup_prompt,
-                    chat_id=discord_chat_id,
-                    is_main_session=True,
+                response = await asyncio.wait_for(
+                    agent.reply(
+                        message=startup_prompt,
+                        chat_id=discord_chat_id,
+                        is_main_session=True,
+                    ),
+                    timeout=120,
                 )
                 if response and response.strip():
                     await discord_bot._send_chunked(tarn_channel, response)
+            except asyncio.TimeoutError:
+                log.warning("Discord startup context review timed out after 120s for channel %s", discord_chat_id)
             except Exception:
                 log.exception("Failed to run Discord startup context review for channel %s", discord_chat_id)
                 try:
@@ -436,6 +446,25 @@ def apply_overrides(config, args: argparse.Namespace) -> None:
         config.api_port = args.port
     if args.identity_dir is not None:
         config.identity_dir = args.identity_dir.resolve()
+        # Load agent-specific .env (e.g. agents/tarn/.env) so that
+        # TELEGRAM_BOT_TOKEN, DISCORD_BOT_TOKEN, etc. are picked up
+        # when launched via restart-tarn or the watchdog.
+        agent_env = config.identity_dir / ".env"
+        if agent_env.exists():
+            from dotenv import load_dotenv
+            load_dotenv(agent_env, override=True)
+            import os
+            config.telegram_bot_token = os.getenv("TELEGRAM_BOT_TOKEN", "")
+            config.discord_bot_token = os.getenv("DISCORD_BOT_TOKEN", "")
+            config.primary_model = os.getenv("PRIMARY_MODEL", config.primary_model)
+            hb = os.getenv("HEARTBEAT_CHAT_ID", "")
+            if hb:
+                config.heartbeat_chat_id = int(hb)
+            allowed = os.getenv("TELEGRAM_ALLOWED_USERS", "")
+            if allowed:
+                config.telegram_allowed_users = [
+                    int(uid.strip()) for uid in allowed.split(",") if uid.strip()
+                ]
     if args.memory_dir is not None:
         config.memory_dir = args.memory_dir.resolve()
     if args.data_dir is not None:
