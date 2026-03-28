@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+# send_discord — Send an interim Discord message during a long-running task.
+#
+# Usage: send_discord "message text"
+#
+# Reads DISCORD_BOT_TOKEN from agents/tarn/.env
+# Reads active channel_id from /tmp/tarn_active_discord_channel
+# (written by discord_channel.py on each inbound message)
+#
+# Call this BEFORE starting slow work so Tyler gets a heads-up:
+#   send_discord "on it, checking the repo..."
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+HOLLOW_ROOT="$(dirname "$SCRIPT_DIR")"
+TARN_ENV="$HOLLOW_ROOT/agents/tarn/.env"
+ACTIVE_CHANNEL_FILE="/tmp/tarn_active_discord_channel"
+
+if [[ $# -lt 1 ]]; then
+    echo "Usage: send_discord \"message text\"" >&2
+    exit 1
+fi
+
+MESSAGE="$*"
+
+# Load DISCORD_BOT_TOKEN from tarn's .env
+if [[ ! -f "$TARN_ENV" ]]; then
+    echo "send_discord: tarn .env not found at $TARN_ENV" >&2
+    exit 1
+fi
+
+TOKEN=""
+while IFS= read -r line || [[ -n "$line" ]]; do
+    line="${line#"${line%%[![:space:]]*}"}"
+    [[ "$line" =~ ^# ]] && continue
+    [[ "$line" =~ ^DISCORD_BOT_TOKEN=(.+)$ ]] && TOKEN="${BASH_REMATCH[1]}" && break
+done < "$TARN_ENV"
+
+if [[ -z "$TOKEN" ]]; then
+    echo "send_discord: DISCORD_BOT_TOKEN not found in $TARN_ENV" >&2
+    exit 1
+fi
+
+# Read active channel_id
+if [[ ! -f "$ACTIVE_CHANNEL_FILE" ]]; then
+    echo "send_discord: no active Discord channel (no inbound message received yet)" >&2
+    exit 1
+fi
+
+CHANNEL_ID="$(cat "$ACTIVE_CHANNEL_FILE")"
+if [[ -z "$CHANNEL_ID" ]]; then
+    echo "send_discord: active channel_id is empty" >&2
+    exit 1
+fi
+
+# Send via Discord Bot API
+RESPONSE="$(curl -s -X POST \
+    "https://discord.com/api/v10/channels/${CHANNEL_ID}/messages" \
+    -H "Authorization: Bot ${TOKEN}" \
+    -H "Content-Type: application/json" \
+    -d "{\"content\": $(python3 -c "import json,sys; print(json.dumps(sys.argv[1]))" "$MESSAGE")}")"
+
+# Check for Discord API error (presence of "id" field in response means success)
+OK="$(echo "$RESPONSE" | python3 -c "import json,sys; d=json.load(sys.stdin); print('true' if 'id' in d else 'false')" 2>/dev/null || echo "false")"
+
+if [[ "$OK" != "true" ]]; then
+    echo "send_discord: Discord API error: $RESPONSE" >&2
+    exit 1
+fi
+
+exit 0

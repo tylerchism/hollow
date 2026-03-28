@@ -13,7 +13,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
 from src.agent import AgentRunner
-from src.channels import TelegramBot
+from src.channels import DiscordBot, TelegramBot
 from src.config import load_config
 from src.memory import MemoryManager
 
@@ -82,6 +82,7 @@ def setup_scheduler(
     bot: TelegramBot | None,
     crons: list[dict],
     default_tz: str,
+    discord_bot: DiscordBot | None = None,
 ) -> AsyncIOScheduler:
     """Create and configure APScheduler with cron jobs."""
     scheduler = AsyncIOScheduler(
@@ -103,6 +104,9 @@ def setup_scheduler(
         chat_id = job_def.get("chat_id", f"cron_{name}")
         is_main_session = job_def.get("is_main_session", False)
         notify_telegram = job_def.get("notify_telegram", False)
+        notify_discord = job_def.get("notify_discord", False)
+        # Optional: post to a named Discord channel (e.g. "morning-brief")
+        discord_channel_name = job_def.get("discord_channel_name", "")
 
         # Parse cron expression: "min hour day month dow"
         parts = schedule.split()
@@ -125,6 +129,8 @@ def setup_scheduler(
             _chat_id=chat_id,
             _is_main=is_main_session,
             _notify=notify_telegram,
+            _notify_discord=notify_discord,
+            _discord_channel_name=discord_channel_name,
         ):
             log.info("Cron job '%s' firing", _name)
             try:
@@ -137,6 +143,25 @@ def setup_scheduler(
 
                 if _notify and bot and agent.config.heartbeat_chat_id:
                     await bot.send_message(agent.config.heartbeat_chat_id, response)
+
+                if discord_bot and (_notify_discord or _discord_channel_name):
+                    if _discord_channel_name:
+                        # Try to post to the named channel on every guild
+                        sent_any = False
+                        for guild in discord_bot._client.guilds:
+                            sent = await discord_bot.send_to_named_channel(
+                                guild, _discord_channel_name, response
+                            )
+                            sent_any = sent_any or sent
+                        if not sent_any:
+                            log.warning(
+                                "Cron '%s': Discord channel '#%s' not found on any guild",
+                                _name,
+                                _discord_channel_name,
+                            )
+                    elif _notify_discord and agent.config.heartbeat_chat_id:
+                        # Fall back to heartbeat channel ID if no channel name given
+                        await discord_bot.send_message(agent.config.heartbeat_chat_id, response)
             except Exception:
                 log.exception("Cron job '%s' failed", _name)
 
@@ -203,9 +228,14 @@ async def run(args: argparse.Namespace = None):
     if config.telegram_bot_token:
         bot = TelegramBot(config, agent)
 
+    # Initialize Discord bot (if token available)
+    discord_bot = None
+    if config.discord_bot_token:
+        discord_bot = DiscordBot(config, agent)
+
     # Load and set up cron scheduler
     crons = load_crons(config.memory_dir)
-    scheduler = setup_scheduler(agent, bot, crons, config.user_timezone)
+    scheduler = setup_scheduler(agent, bot, crons, config.user_timezone, discord_bot=discord_bot)
 
     # Set up HTTP API
     api_app = make_api_app(agent)
@@ -225,11 +255,17 @@ async def run(args: argparse.Namespace = None):
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, signal_handler)
 
+    discord_task = None
     try:
         # Start services
         if bot:
             await bot.start()
             log.info("Telegram bot started")
+
+        if discord_bot:
+            # discord.py's start() runs until close() is called — run as background task
+            discord_task = asyncio.create_task(discord_bot.start())
+            log.info("Discord bot starting (background task)")
 
         scheduler.start()
         log.info("APScheduler started with %d job(s)", len(scheduler.get_jobs()))
@@ -239,6 +275,14 @@ async def run(args: argparse.Namespace = None):
     finally:
         log.info("Shutting down...")
         scheduler.shutdown(wait=False)
+        if discord_bot:
+            await discord_bot.stop()
+            if discord_task and not discord_task.done():
+                discord_task.cancel()
+                try:
+                    await discord_task
+                except (asyncio.CancelledError, Exception):
+                    pass
         if bot:
             await bot.stop()
         await api_runner.cleanup()

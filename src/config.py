@@ -14,6 +14,7 @@ from dotenv import load_dotenv
 class Config:
     # API Keys
     telegram_bot_token: str = ""
+    discord_bot_token: str = ""
     xai_api_key: str = ""
 
     # Paths
@@ -46,6 +47,7 @@ def load_config() -> Config:
 
     config = Config(
         telegram_bot_token=os.getenv("TELEGRAM_BOT_TOKEN", ""),
+        discord_bot_token=os.getenv("DISCORD_BOT_TOKEN", ""),
         xai_api_key=os.getenv("XAI_API_KEY", ""),
         project_root=project_root,
         memory_dir=Path(os.getenv("MEMORY_DIR", str(project_root / "agent-memory" / "tarn"))),
