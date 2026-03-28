@@ -152,6 +152,28 @@ def try_restart(name: str, port: int) -> bool:
     log_path = LOG_DIR / f"{name}.log"
     log(f"  restart: attempting to relaunch {name} (port {port})...")
 
+    # Special case: tarn uses restart-tarn script
+    if name == "tarn":
+        restart_script = HOLLOW_ROOT / "bin" / "restart-tarn"
+        try:
+            subprocess.run(
+                ["bash", str(restart_script)],
+                cwd=str(HOLLOW_ROOT),
+                check=False,
+            )
+        except Exception as e:
+            log(f"  restart: restart-tarn failed: {e}")
+            return False
+        # restart-tarn already waits 2s internally; wait 5s total to be sure
+        time.sleep(5)
+        healthy, detail = ping_agent(name, port)
+        if healthy:
+            log(f"  restart: {name} is back up (via restart-tarn)")
+            return True
+        else:
+            log(f"  restart: {name} still down after restart-tarn — {detail}")
+            return False
+
     # Read config for this specific agent to build the launch command
     cfg = load_config()
     all_agents = [cfg["coordinator"]] + cfg.get("agents", [])
@@ -191,6 +213,7 @@ def try_restart(name: str, port: int) -> bool:
                 stderr=logf,
                 cwd=str(HOLLOW_ROOT),
                 env=env,
+                preexec_fn=os.setsid,
             )
         # Give it 3 seconds then verify it's alive
         time.sleep(3)
