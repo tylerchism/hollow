@@ -56,15 +56,24 @@ def main():
         print("Error: XAI_API_KEY not set", file=sys.stderr)
         sys.exit(1)
 
-    prompt = custom_prompt or (
-        f"Please analyze this tweet: {tweet_url}\n\n"
-        "Provide:\n"
-        "1. The full text of the tweet\n"
-        "2. Who posted it and any relevant context about them\n"
-        "3. If there is a video or image, describe what is shown/said in detail — "
-        "include any spoken words or text visible in the video\n"
-        "4. Any relevant replies or quote tweets if notable"
-    )
+    if custom_prompt:
+        # Always embed the tweet URL in custom prompts if not already present
+        if tweet_url not in custom_prompt:
+            prompt = f"Tweet URL: {tweet_url}\n\n{custom_prompt}"
+        else:
+            prompt = custom_prompt
+    else:
+        prompt = (
+            f"Please analyze this tweet: {tweet_url}\n\n"
+            "Provide:\n"
+            "1. The full text of the tweet\n"
+            "2. Who posted it and any relevant context about them\n"
+            "3. If there is a video or image, provide a complete verbatim transcript of all spoken words "
+            "and describe what is shown in detail\n"
+            "4. The core message or argument being made — including any philosophical, spiritual, or "
+            "ideological points the speaker makes\n"
+            "5. Any relevant replies or quote tweets if notable"
+        )
 
     payload = json.dumps({
         "model": "grok-4-1-fast",
