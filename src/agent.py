@@ -362,10 +362,13 @@ class AgentRunner:
             # subprocess to exit with code 143, surfaced as a plain Exception with
             # "exit code 143" in the message. Also catch CancelledError subclasses
             # by name (e.g. from trio/anyio interop) and stop_event if available.
+            _e_str = str(e)
             _is_shutdown = (
-                "exit code 143" in str(e)
+                "exit code 143" in _e_str        # ProcessError SIGTERM: "Command failed with exit code 143"
+                or "(exit code: 143)" in _e_str  # CLIConnectionError SIGTERM: "Cannot write to terminated process (exit code: 143)"
+                or "(exit code: 137)" in _e_str  # SIGKILL variants
+                or "exit code 137" in _e_str
                 or type(e).__name__ == "CancelledError"
-                or (hasattr(self, "stop_event") and self.stop_event is not None and self.stop_event.is_set())
             )
             if _is_shutdown:
                 log.info(
