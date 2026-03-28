@@ -10,6 +10,9 @@ hollow.config.json
 # Contains user profile data and conversation history; never commit live memory
 agent-memory/
 
+# User-specific agent customization files (generated from personal profile)
+agents/*/voice.md
+
 # SQLite databases
 *.db
 *.db-shm
