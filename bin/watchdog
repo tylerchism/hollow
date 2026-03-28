@@ -102,20 +102,27 @@ def send_telegram(token: str, chat_id: int, text: str) -> bool:
         return False
 
 
-def ping_agent(name: str, port: int) -> tuple[bool, str]:
-    """Returns (is_healthy, detail)."""
+def ping_agent(name: str, port: int) -> tuple[bool, str, dict]:
+    """Returns (is_healthy, detail, bots_status).
+
+    bots_status is a dict like {"telegram": True, "discord": True} when the
+    /health endpoint includes bot connectivity info; empty dict otherwise.
+    """
     url = f"http://127.0.0.1:{port}/health"
     req = urllib.request.Request(url, method="GET")
     try:
         with urllib.request.urlopen(req, timeout=HEALTH_TIMEOUT) as resp:
             body = json.load(resp)
-            if body.get("status") == "ok":
-                return True, "ok"
-            return False, f"unexpected response: {body}"
+            status = body.get("status", "")
+            bots = body.get("bots", {})
+            # "ok" and "degraded" both mean the process is alive
+            if status in ("ok", "degraded"):
+                return True, status, bots
+            return False, f"unexpected response: {body}", {}
     except urllib.error.URLError as e:
-        return False, f"connection refused or timeout: {e.reason}"
+        return False, f"connection refused or timeout: {e.reason}", {}
     except Exception as e:
-        return False, str(e)
+        return False, str(e), {}
 
 
 def load_state() -> dict:
@@ -139,7 +146,26 @@ def in_cooldown(state: dict, name: str) -> bool:
     return elapsed < (COOLDOWN_MINUTES * 60)
 
 
-def try_restart(name: str, port: int) -> bool:
+def check_bot_health(name: str, port: int, token: str | None, chat_id: int) -> None:
+    """After a successful restart, verify bots are connected; alert if not."""
+    _, _, bots = ping_agent(name, port)
+    if not bots:
+        # Agent doesn't expose bot status yet — nothing to check.
+        return
+    deaf = [bot_name for bot_name, ok in bots.items() if not ok]
+    if not deaf:
+        log(f"  bot health: all bots connected for {name}")
+        return
+    msg = (
+        f"⚠️ {name} restarted and HTTP is healthy, but bot(s) did not connect: "
+        f"{', '.join(deaf)}. Check logs manually."
+    )
+    log(f"  bot health: {msg}")
+    if token:
+        send_telegram(token, chat_id, msg)
+
+
+def try_restart(name: str, port: int, token: str | None = None, chat_id: int = TYLER_CHAT_ID) -> bool:
     """
     Attempt to restart a dead agent by re-running start.sh for that agent only.
     This is best-effort — if start.sh doesn't support single-agent mode yet, it logs and skips.
@@ -166,9 +192,10 @@ def try_restart(name: str, port: int) -> bool:
             return False
         # restart-tarn already waits 2s internally; wait 5s total to be sure
         time.sleep(5)
-        healthy, detail = ping_agent(name, port)
+        healthy, detail, _ = ping_agent(name, port)
         if healthy:
             log(f"  restart: {name} is back up (via restart-tarn)")
+            check_bot_health(name, port, token, chat_id)
             return True
         else:
             log(f"  restart: {name} still down after restart-tarn — {detail}")
@@ -217,12 +244,13 @@ def try_restart(name: str, port: int) -> bool:
             )
         # Give it 3 seconds then verify it's alive
         time.sleep(3)
-        healthy, detail = ping_agent(name, port)
+        healthy, detail, _ = ping_agent(name, port)
         if healthy:
             log(f"  restart: {name} is back up (pid {proc.pid})")
             # Append new PID to .hollow.pids
             with open(PID_FILE, "a") as f:
                 f.write(f"{proc.pid}\n")
+            check_bot_health(name, port, token, chat_id)
             return True
         else:
             log(f"  restart: {name} still down after relaunch — {detail}")
@@ -261,11 +289,16 @@ def main() -> None:
 
     for a in agents:
         name, port = a["name"], a["port"]
-        healthy, detail = ping_agent(name, port)
+        healthy, detail, bots = ping_agent(name, port)
 
         if healthy:
             up.append(name)
-            log(f"  ✓ {name}:{port}")
+            bot_info = ""
+            if bots:
+                deaf = [b for b, ok in bots.items() if not ok]
+                if deaf:
+                    bot_info = f" (bots deaf: {', '.join(deaf)})"
+            log(f"  ✓ {name}:{port}{bot_info}")
             # Clear any previous down state
             if name in state:
                 state[name]["down"] = False
@@ -273,7 +306,7 @@ def main() -> None:
             log(f"  ✗ {name}:{port} — {detail}")
 
             if args.restart:
-                restarted = try_restart(name, port)
+                restarted = try_restart(name, port, token=token, chat_id=chat_id)
                 if restarted:
                     fixed.append(name)
                     if name in state:
