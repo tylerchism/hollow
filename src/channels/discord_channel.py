@@ -236,14 +236,20 @@ class DiscordBot:
 
             keepalive_task = asyncio.create_task(typing_keepalive())
             try:
-                response = await self.agent.reply(
-                    message=message_text,
-                    chat_id=channel_id,
-                    is_main_session=is_main_session,
+                response = await asyncio.wait_for(
+                    self.agent.reply(
+                        message=message_text,
+                        chat_id=channel_id,
+                        is_main_session=is_main_session,
+                    ),
+                    timeout=300,
                 )
                 if not response or not response.strip():
                     response = "I ran out of investigation steps before finishing. Send me a message to continue where I left off."
                 await self._send_chunked(message.channel, response)
+            except asyncio.TimeoutError:
+                log.warning("Discord: agent.reply() timed out after 300s for channel %s", channel_id)
+                await message.channel.send("still working on this — taking longer than expected. I'll follow up when I have something.")
             except Exception:
                 log.exception("Discord: error processing message in channel %s", channel_id)
                 await message.channel.send("Something went wrong. Try again in a moment.")

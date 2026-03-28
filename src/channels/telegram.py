@@ -567,10 +567,13 @@ class TelegramBot:
 
             keepalive_task = asyncio.create_task(typing_keepalive())
             try:
-                response = await self.agent.reply(
-                    message=message_text,
-                    chat_id=chat_id,
-                    is_main_session=is_dm,
+                response = await asyncio.wait_for(
+                    self.agent.reply(
+                        message=message_text,
+                        chat_id=chat_id,
+                        is_main_session=is_dm,
+                    ),
+                    timeout=300,
                 )
                 if not response or not response.strip():
                     response = "I ran out of investigation steps before finishing. Send me a message to continue where I left off."
@@ -579,6 +582,9 @@ class TelegramBot:
                 else:
                     for i in range(0, len(response), 4096):
                         await update.message.reply_text(response[i : i + 4096])
+            except asyncio.TimeoutError:
+                log.warning("Telegram: agent.reply() timed out after 300s for chat %s", chat_id)
+                await update.message.reply_text("still working on this — taking longer than expected. I'll follow up when I have something.")
             except Exception:
                 log.exception("Error processing media message from chat %s", chat_id)
                 await update.message.reply_text("Something went wrong. Try again in a moment.")
