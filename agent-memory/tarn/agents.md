@@ -12,6 +12,9 @@
 - **hail** — delegate to a specialist agent: `hail canopy "research this"`, `hail briar "stress-test this plan"`
 - **mc** — Mission Control API: `mc tasks list`, `mc tasks create "title"`, `mc tasks update <id> --status=done`, `mc activity log "what happened"`
 - **xsearch** — xAI/Grok search for social media, X/Twitter, real-time web: `xsearch "regenerative agriculture"`
+- **send_discord_channel** — post a message to a NAMED Discord channel (not the active session): `send_discord_channel "morning-brief" "message"`. Use this from cron jobs to send interim updates to the right dedicated channel. Do NOT use send_msg or send_discord inside cron jobs — those route to #tarn or Telegram.
+- **send_discord** — post to the currently active Discord session channel (use for interim status during interactive sessions)
+- **send_msg** — post to whichever channel (Discord or Telegram) is currently active (interactive sessions only; do NOT use in cron jobs)
 
 ### Scheduled Jobs
 APScheduler crons run as a persistent daemon inside this process — they do NOT die with the session. Defined in ~/git/hollow/agent-memory/tarn/crons.json. Currently running: morning_brief, ideas_review, backlog_triage, task_executor, team_retro.
@@ -109,9 +112,17 @@ Note: The `mc activity log` CLI accepts a plain string — format it as shown ab
 
 ## Self-Restart
 
-Tarn runs as a persistent background process. There is no systemd service.
+Tarn runs as a persistent background process. **There is no systemd service.** The ONLY way to restart Tarn is:
 
-**Start command:**
+```
+bash ~/git/hollow/bin/restart-tarn
+```
+
+Do not use `systemctl`, `service`, or any other init system — they are not configured. Tyler must run the command above manually (or you can run it via Bash if instructed).
+
+**What the script does:** Starts a new Tarn process first (fully detached via `setsid`/`nohup`/`disown`), waits 2 seconds for it to bind the port, then kills the old process. This makes it safe to call from within the running Tarn process — the child outlives the parent.
+
+**Full start command** (for reference only — use restart-tarn instead):
 ```
 /usr/local/bin/uv run python -m src.main \
   --port 18800 \
@@ -119,10 +130,6 @@ Tarn runs as a persistent background process. There is no systemd service.
   --memory-dir HOLLOW_ROOT/agent-memory/tarn \
   --data-dir HOLLOW_ROOT/data
 ```
-
-**To restart:** `bash ~/git/hollow/bin/restart-tarn`
-
-The script starts the new process first (fully detached via `setsid`/`nohup`/`disown`), then kills the old one — so calling it from within the running Tarn process is safe: the child outlives the parent.
 
 `_send_startup_notification` in `main.py` fires automatically on restart — no need to add any notification logic to the restart script.
 
