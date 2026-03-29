@@ -112,6 +112,14 @@ class DiscordBot:
         owner_raw = os.getenv("DISCORD_OWNER_ID", "").strip()
         self._owner_id: int | None = int(owner_raw) if owner_raw else None
 
+        # Silent channels (loaded from DISCORD_SILENT_CHANNELS env var,
+        # comma-separated channel names). The bot reads messages in these
+        # channels for cron/context but NEVER responds — not even to the owner.
+        silent_raw = os.getenv("DISCORD_SILENT_CHANNELS", "")
+        self._silent_channels: set[str] = {
+            c.strip().lower() for c in silent_raw.split(",") if c.strip()
+        }
+
     # ─── Dedup ───────────────────────────────────────────────────────────────
 
     def _is_duplicate(self, message_id: int) -> bool:
@@ -285,6 +293,7 @@ class DiscordBot:
         intents.message_content = True  # Required for reading message text
         intents.guilds = True
         intents.dm_messages = True
+        intents.reactions = True
 
         self._client = commands.Bot(
             command_prefix="!",  # Unused but required by commands.Bot
@@ -345,6 +354,14 @@ class DiscordBot:
             if not should_respond:
                 return
 
+            # Silent channel check: takes priority over everything, including
+            # the owner bypass. Tarn can read these channels for context but
+            # must never send a reply.
+            channel_name = getattr(message.channel, "name", "").lower()
+            if channel_name in self._silent_channels:
+                log.debug("Discord: silent channel %r — skipping response", channel_name)
+                return
+
             channel_id = str(message.channel.id)
             is_main_session = is_dm or is_tarn_channel
 
@@ -396,6 +413,38 @@ class DiscordBot:
                 message_text=content,
                 is_main_session=is_main_session,
             )
+
+        @client.event
+        async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
+            """💰 reaction on #ai-money → create MC idea."""
+            # Only owner
+            if self._owner_id is None or payload.user_id != self._owner_id:
+                return
+            # Only 💰 emoji
+            if str(payload.emoji) != "💰":
+                return
+            # Only in #ai-money channel
+            channel = client.get_channel(payload.channel_id)
+            if channel is None or not hasattr(channel, "name") or channel.name != "ai-money":
+                return
+            try:
+                message = await channel.fetch_message(payload.message_id)
+                content = message.content or ""
+                # Truncate to 80 chars for title
+                title = content[:80].strip()
+                if not title:
+                    return
+                # Escape quotes for shell
+                safe_title = title.replace('"', '\\"')
+                proc = await asyncio.create_subprocess_shell(
+                    f'mc ideas create "{safe_title}"',
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                await proc.communicate()
+                await channel.send("✅ Added to Mission Control ideas board")
+            except Exception:
+                log.exception("Failed to create MC idea from reaction")
 
         @client.tree.command(name="clear", description="Clear conversation history for this channel")
         async def slash_clear(interaction: discord.Interaction):
