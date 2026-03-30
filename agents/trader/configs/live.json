@@ -1,0 +1,34 @@
+{
+  "_WARNING": "THIS IS LIVE TRADING CONFIG — REAL CAPITAL AT RISK. Requires --mode=live flag to activate. Do NOT use unless you intend to trade with real money.",
+  "mode": "live",
+  "live_capital": true,
+  "crypto": {
+    "exchange": "binance",
+    "testnet": false,
+    "api_key": "",
+    "api_secret": "",
+    "symbols": ["BTC/USDT", "ETH/USDT"],
+    "timeframes": ["1h", "1d"]
+  },
+  "equities": {
+    "provider": "alpaca",
+    "paper": false,
+    "api_key": "",
+    "api_secret": "",
+    "base_url": "https://api.alpaca.markets",
+    "symbols": ["SPY", "QQQ", "AAPL"]
+  },
+  "storage": {
+    "db_path": "~/.local/share/hollow-trader/trader.db",
+    "trade_log_path": "~/.local/share/hollow-trader/trades.jsonl"
+  },
+  "pdt": {
+    "enabled": true,
+    "max_day_trades_per_5_days": 3,
+    "min_equity_for_pdt_exemption_usd": 25000
+  },
+  "ingestion": {
+    "interval_seconds": 300,
+    "lookback_days": 30
+  }
+}

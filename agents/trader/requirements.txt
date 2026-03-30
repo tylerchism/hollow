@@ -1,0 +1,22 @@
+# hollow-trader V0 — pinned dependencies with sha256 hashes
+#
+# Supply chain rules:
+#   - All versions pinned exactly (no ranges)
+#   - Release dates verified on or before 2026-03-18
+#   - Hashes sourced from PyPI JSON API (https://pypi.org/pypi/<pkg>/<ver>/json)
+#   - Install into a dedicated venv, NOT the hollow venv:
+#
+#       python3 -m venv ~/.local/share/hollow-trader/venv
+#       source ~/.local/share/hollow-trader/venv/bin/activate
+#       pip install --require-hashes -r requirements.txt
+#
+# ccxt 4.5.44 — released 2026-03-17
+# alpaca-py 0.43.2 — released 2025-11-04
+
+ccxt==4.5.44 \
+    --hash=sha256:a03deab603cdec47034ae3689c9e6dc5e71b82f51816e93eb7a1b6335fab65a8 \
+    --hash=sha256:e488b7f812c3dc61afb0560100c8ea60d1a72f5b936f212fdae33382fb0ce1f7
+
+alpaca-py==0.43.2 \
+    --hash=sha256:ee608d9744b57766dcce60ff88523073fad798a7361c9bf1ec7a499eec5f19e5 \
+    --hash=sha256:e03c7845a9ac6b5581c31f007fe0671f0c536538f130eb8407890a4ba37ee866
