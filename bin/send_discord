@@ -7,6 +7,11 @@
 # Reads active channel_id from /tmp/tarn_active_discord_channel
 # (written by discord_channel.py on each inbound message)
 #
+# If the active channel has a dedicated webhook route (e.g. #trader-bot → Flux),
+# the message is posted via webhook with the agent's display name instead of
+# the bot token. The webhook URL is written to /tmp/tarn_active_discord_webhook
+# and the display name to /tmp/tarn_active_discord_webhook_name.
+#
 # Call this BEFORE starting slow work so Tyler gets a heads-up:
 #   send_discord "on it, checking the repo..."
 
@@ -16,6 +21,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HOLLOW_ROOT="$(dirname "$SCRIPT_DIR")"
 TARN_ENV="$HOLLOW_ROOT/agents/tarn/.env"
 ACTIVE_CHANNEL_FILE="/tmp/tarn_active_discord_channel"
+ACTIVE_WEBHOOK_FILE="/tmp/tarn_active_discord_webhook"
+ACTIVE_WEBHOOK_NAME_FILE="/tmp/tarn_active_discord_webhook_name"
 
 if [[ $# -lt 1 ]]; then
     echo "Usage: send_discord \"message text\"" >&2
@@ -24,7 +31,48 @@ fi
 
 MESSAGE="$*"
 
-# Load DISCORD_BOT_TOKEN from tarn's .env
+# Read active channel_id
+if [[ ! -f "$ACTIVE_CHANNEL_FILE" ]]; then
+    echo "send_discord: no active Discord channel (no inbound message received yet)" >&2
+    exit 1
+fi
+
+CHANNEL_ID="$(cat "$ACTIVE_CHANNEL_FILE")"
+if [[ -z "$CHANNEL_ID" ]]; then
+    echo "send_discord: active channel_id is empty" >&2
+    exit 1
+fi
+
+# ── Webhook path (routed channels like #trader-bot → Flux) ───────────────────
+# If a webhook file exists, post via webhook as the routed agent name.
+# This avoids using the bot token and posts with the correct display name.
+if [[ -f "$ACTIVE_WEBHOOK_FILE" ]]; then
+    WEBHOOK_URL="$(cat "$ACTIVE_WEBHOOK_FILE")"
+    DISPLAY_NAME="Flux"
+    if [[ -f "$ACTIVE_WEBHOOK_NAME_FILE" ]]; then
+        DISPLAY_NAME="$(cat "$ACTIVE_WEBHOOK_NAME_FILE")"
+    fi
+
+    if [[ -n "$WEBHOOK_URL" ]]; then
+        PAYLOAD="$(python3 -c "
+import json, sys
+print(json.dumps({'content': sys.argv[1], 'username': sys.argv[2]}))
+" "$MESSAGE" "$DISPLAY_NAME")"
+
+        HTTP_STATUS="$(curl -s -o /dev/null -w "%{http_code}" -X POST \
+            "$WEBHOOK_URL" \
+            -H "Content-Type: application/json" \
+            -d "$PAYLOAD")"
+
+        if [[ "$HTTP_STATUS" == "204" || "$HTTP_STATUS" == "200" ]]; then
+            exit 0
+        else
+            echo "send_discord: webhook POST returned HTTP $HTTP_STATUS — falling back to bot API" >&2
+        fi
+    fi
+fi
+
+# ── Bot API path (default: #tarn and DMs) ────────────────────────────────────
 if [[ ! -f "$TARN_ENV" ]]; then
     echo "send_discord: tarn .env not found at $TARN_ENV" >&2
     exit 1
@@ -39,18 +87,6 @@ done < "$TARN_ENV"
 
 if [[ -z "$TOKEN" ]]; then
     echo "send_discord: DISCORD_BOT_TOKEN not found in $TARN_ENV" >&2
-    exit 1
-fi
-
-# Read active channel_id
-if [[ ! -f "$ACTIVE_CHANNEL_FILE" ]]; then
-    echo "send_discord: no active Discord channel (no inbound message received yet)" >&2
-    exit 1
-fi
-
-CHANNEL_ID="$(cat "$ACTIVE_CHANNEL_FILE")"
-if [[ -z "$CHANNEL_ID" ]]; then
-    echo "send_discord: active channel_id is empty" >&2
     exit 1
 fi
 

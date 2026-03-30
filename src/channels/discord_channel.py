@@ -18,23 +18,32 @@ so that bin/send_discord and bin/send_msg can fire mid-turn messages.
 """
 
 import asyncio
+import json
 import logging
 import os
 import pathlib
 import tempfile
 import time
+import urllib.error
+import urllib.request
 from typing import Callable
 
 import discord
 from discord.ext import commands
 
 from src.agent import AgentRunner
+from src.channels.background_tasks import BackgroundTaskManager
 from src.config import Config
 
 log = logging.getLogger(__name__)
 
 # Channel name the bot treats as "always respond here" (case-insensitive)
 TARN_CHANNEL_NAME = "tarn"
+
+# File written so send_discord can detect that the active channel is trader-bot
+# and should use the webhook (posting as "Flux") instead of the bot API.
+ACTIVE_WEBHOOK_FILE = pathlib.Path(tempfile.gettempdir()) / "tarn_active_discord_webhook"
+ACTIVE_WEBHOOK_NAME_FILE = pathlib.Path(tempfile.gettempdir()) / "tarn_active_discord_webhook_name"
 
 # Discord message character limit
 DISCORD_MSG_LIMIT = 2000
@@ -84,6 +93,82 @@ class MessageQueue:
         self._queues.clear()
 
 
+def _load_channel_routing() -> dict[str, dict]:
+    """Load channel routing config from hollow.config.json.
+
+    Returns a dict keyed by discord_channel name (e.g. "trader-bot") with
+    values containing at least: port, webhook_url, display_name.
+    """
+    routing: dict[str, dict] = {}
+    try:
+        config_path = pathlib.Path(__file__).parent.parent.parent / "hollow.config.json"
+        if not config_path.exists():
+            return routing
+        data = json.loads(config_path.read_text())
+        for agent in data.get("agents", []):
+            ch = agent.get("discord_channel", "").strip().lower()
+            if not ch:
+                continue
+            routing[ch] = {
+                "name": agent.get("name", ""),
+                "port": int(agent.get("port", 0)),
+                "webhook_url": agent.get("discord_webhook", ""),
+                "display_name": agent.get("discord_display_name", agent.get("name", "")),
+            }
+    except Exception:
+        log.exception("Failed to load channel routing from hollow.config.json")
+    return routing
+
+
+async def _post_to_agent(port: int, message: str, chat_id: str) -> str | None:
+    """POST to an agent's /ask endpoint. Returns the response text or None on error."""
+    import asyncio
+    loop = asyncio.get_running_loop()
+    url = f"http://127.0.0.1:{port}/ask"
+    payload = json.dumps({
+        "message": message,
+        "chat_id": chat_id,
+        "is_main_session": True,
+    }).encode()
+
+    def _do_request():
+        req = urllib.request.Request(url, data=payload, method="POST")
+        req.add_header("Content-Type", "application/json")
+        with urllib.request.urlopen(req, timeout=300) as resp:
+            data = json.loads(resp.read().decode())
+            return data.get("response", "")
+
+    try:
+        return await loop.run_in_executor(None, _do_request)
+    except Exception:
+        log.exception("Failed to POST to agent at port %d", port)
+        return None
+
+
+async def _send_webhook(webhook_url: str, text: str, username: str) -> None:
+    """POST a message to a Discord webhook as the given username."""
+    import asyncio
+    loop = asyncio.get_running_loop()
+    discord_msg_limit = 2000
+
+    def _post_chunk(chunk: str) -> None:
+        payload = json.dumps({"content": chunk, "username": username}).encode()
+        req = urllib.request.Request(webhook_url, data=payload, method="POST")
+        req.add_header("Content-Type", "application/json")
+        try:
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                _ = resp.read()
+        except urllib.error.HTTPError as exc:
+            log.error("Webhook POST failed: %s %s", exc.code, exc.reason)
+        except Exception:
+            log.exception("Webhook POST error")
+
+    text = str(text)
+    chunks = [text[i: i + discord_msg_limit] for i in range(0, len(text), discord_msg_limit)] if text else [""]
+    for chunk in chunks:
+        await loop.run_in_executor(None, _post_chunk, chunk)
+
+
 class DiscordBot:
     """Discord bot that routes messages through MessageQueue to AgentRunner."""
 
@@ -97,6 +182,15 @@ class DiscordBot:
 
         # Dedup: message_id -> completed_at timestamp
         self._dedup_cache: dict[int, float] = {}
+        self._bg_tasks = BackgroundTaskManager()
+
+        # Channel routing: maps discord_channel names → agent config
+        # Loaded once at startup from hollow.config.json.
+        self._channel_routing: dict[str, dict] = _load_channel_routing()
+        log.info(
+            "Discord channel routing loaded: %s",
+            {ch: r["name"] for ch, r in self._channel_routing.items()},
+        )
 
         # Allowed Discord user IDs (loaded from DISCORD_ALLOWED_USERS env var,
         # comma-separated). Empty = allow all.
@@ -141,12 +235,29 @@ class DiscordBot:
 
     # ─── Active channel tracking ─────────────────────────────────────────────
 
-    def _write_active_channel(self, channel_id: str) -> None:
+    def _write_active_channel(self, channel_id: str, channel_name: str = "") -> None:
         try:
             import time
             ACTIVE_CHANNEL_FILE.write_text(channel_id)
             ts_file = pathlib.Path(tempfile.gettempdir()) / "tarn_active_discord_ts"
             ts_file.write_text(str(int(time.time())))
+
+            # If this channel has a dedicated webhook route, write the webhook
+            # URL and display name so send_discord / send_msg can post as the
+            # routed agent (e.g. "Flux" in #trader-bot) via webhook.
+            channel_name_lower = channel_name.lower()
+            routing = self._channel_routing.get(channel_name_lower)
+            if routing and routing.get("webhook_url"):
+                ACTIVE_WEBHOOK_FILE.write_text(routing["webhook_url"])
+                ACTIVE_WEBHOOK_NAME_FILE.write_text(routing["display_name"])
+            else:
+                # Clear any stale webhook files when the active channel changes
+                # to a non-routed channel.
+                try:
+                    ACTIVE_WEBHOOK_FILE.unlink(missing_ok=True)
+                    ACTIVE_WEBHOOK_NAME_FILE.unlink(missing_ok=True)
+                except Exception:
+                    pass
         except Exception:
             pass
 
@@ -179,7 +290,7 @@ class DiscordBot:
             return []
         results = []
         for guild in self._client.guilds:
-            channel = discord.utils.get(guild.text_channels, name=TARN_CHANNEL_NAME)
+            channel = discord.utils.get(guild.text_channels, name=self.config.discord_channel_name)
             if channel is not None:
                 results.append((str(channel.id), channel))
         return results
@@ -219,6 +330,7 @@ class DiscordBot:
         user_id: int,
         message_text: str,
         is_main_session: bool,
+        channel_name: str = "",
     ) -> None:
         """Shared processing pipeline for all message types (mirrors telegram.py)."""
         msg_id = message.id
@@ -228,7 +340,7 @@ class DiscordBot:
             return
 
         # Write active channel for bin/send_discord and bin/send_msg
-        self._write_active_channel(channel_id)
+        self._write_active_channel(channel_id, channel_name=channel_name)
 
         async def process():
             # Show typing indicator while the agent works
@@ -245,27 +357,66 @@ class DiscordBot:
 
             keepalive_task = asyncio.create_task(typing_keepalive())
             try:
-                response = await asyncio.wait_for(
+                # Create the task without wait_for so it is never cancelled on
+                # timeout — we can hand it off to BackgroundTaskManager instead.
+                reply_task = asyncio.create_task(
                     self.agent.reply(
                         message=message_text,
                         chat_id=channel_id,
                         is_main_session=is_main_session,
-                    ),
-                    timeout=900,
+                    )
                 )
-                # Empty response can mean either genuinely no output OR the agent
-                # suppressed a shutdown error and returned "". In both cases, only
-                # send the fallback if we are NOT shutting down.
-                if not response or not response.strip():
-                    if not self._shutting_down:
-                        response = "I ran out of investigation steps before finishing. Send me a message to continue where I left off."
+                finished, _ = await asyncio.wait({reply_task}, timeout=900)
+
+                if reply_task in finished:
+                    # Completed within the initial wait window — deliver normally.
+                    exc = reply_task.exception()
+                    if exc is not None:
+                        raise exc
+                    response = reply_task.result()
+                    # Empty response can mean either genuinely no output OR the agent
+                    # suppressed a shutdown error and returned "". In both cases, only
+                    # send the fallback if we are NOT shutting down.
+                    if not response or not response.strip():
+                        if not self._shutting_down:
+                            fallback = "I ran out of investigation steps before finishing. Send me a message to continue where I left off."
+                            await self._send_chunked(message.channel, fallback)
+                    else:
                         await self._send_chunked(message.channel, response)
                 else:
-                    await self._send_chunked(message.channel, response)
-            except asyncio.TimeoutError:
-                log.warning("Discord: agent.reply() timed out after 900s for channel %s", channel_id)
-                if not self._shutting_down:
-                    await message.channel.send("still on it...")
+                    # Timed out — keep the task alive and hand it to the manager.
+                    log.info(
+                        "Discord: agent.reply() still running after 900s for channel %s — handing off to background",
+                        channel_id,
+                    )
+                    if not self._shutting_down:
+                        await message.channel.send(
+                            "Still on it — this is taking longer than usual. I'll post the result here when it's done."
+                        )
+
+                    # Capture channel reference in closure for later delivery.
+                    _channel = message.channel
+                    _shutting_down_ref = self  # to check self._shutting_down at delivery time
+
+                    async def _deliver(result: str, _ch=_channel, _sd=_shutting_down_ref) -> None:
+                        if _sd._shutting_down:
+                            return
+                        if not result or not result.strip():
+                            result = "I ran out of investigation steps before finishing. Send me a message to continue where I left off."
+                        await _sd._send_chunked(_ch, result)
+
+                    async def _on_error(exc: Exception, _ch=_channel, _sd=_shutting_down_ref) -> None:
+                        if _sd._shutting_down:
+                            return
+                        await _ch.send("Something went wrong with that task. Try again in a moment.")
+
+                    self._bg_tasks.register(
+                        task=reply_task,
+                        deliver_fn=_deliver,
+                        error_fn=_on_error,
+                        channel_type="discord",
+                        channel_id=channel_id,
+                    )
             except Exception:
                 log.exception("Discord: error processing message in channel %s", channel_id)
                 if not self._shutting_down:
@@ -336,7 +487,7 @@ class DiscordBot:
             is_tarn_channel = (
                 not is_dm
                 and hasattr(message.channel, "name")
-                and message.channel.name.lower() == TARN_CHANNEL_NAME
+                and message.channel.name.lower() == self.config.discord_channel_name
             )
             is_mentioned = client.user in message.mentions
             is_reply_to_bot = (
@@ -350,7 +501,12 @@ class DiscordBot:
             # message author, respond regardless of channel.
             is_owner = self._owner_id is not None and user_id == self._owner_id
 
-            should_respond = is_dm or is_tarn_channel or is_mentioned or is_reply_to_bot or is_owner
+            # Routed channels: channels mapped to specialist agents in hollow.config.json
+            # (e.g. #trader-bot → Flux). Always respond in these channels.
+            _pre_channel_name = getattr(message.channel, "name", "").lower()
+            is_routed_channel = _pre_channel_name in self._channel_routing
+
+            should_respond = is_dm or is_tarn_channel or is_mentioned or is_reply_to_bot or is_owner or is_routed_channel
             if not should_respond:
                 return
 
@@ -406,12 +562,54 @@ class DiscordBot:
             if not content:
                 return
 
+            # Channel routing: if this channel is mapped to a specialist agent,
+            # POST to that agent's /ask endpoint and reply via webhook instead of
+            # routing through Tarn.
+            routing = self._channel_routing.get(channel_name)
+            if routing and routing.get("port") and routing.get("webhook_url"):
+                log.info(
+                    "Discord: routing #%s message to agent '%s' (port=%d)",
+                    channel_name,
+                    routing["name"],
+                    routing["port"],
+                )
+                self._write_active_channel(channel_id, channel_name=channel_name)
+                self._mark_seen(message.id)
+
+                async def _routed_handler(
+                    _content=content,
+                    _channel_id=channel_id,
+                    _routing=routing,
+                    _discord_channel=message.channel,
+                ):
+                    async with _discord_channel.typing():
+                        response = await _post_to_agent(
+                            port=_routing["port"],
+                            message=_content,
+                            chat_id=_channel_id,
+                        )
+                    if response and response.strip():
+                        await _send_webhook(
+                            webhook_url=_routing["webhook_url"],
+                            text=response,
+                            username=_routing["display_name"],
+                        )
+                    else:
+                        log.warning(
+                            "Discord: routed agent '%s' returned empty response",
+                            _routing["name"],
+                        )
+
+                await self._queue.enqueue(channel_id, _routed_handler)
+                return
+
             await self._process_and_reply(
                 message=message,
                 channel_id=channel_id,
                 user_id=user_id,
                 message_text=content,
                 is_main_session=is_main_session,
+                channel_name=channel_name,
             )
 
         @client.event
@@ -474,12 +672,13 @@ class DiscordBot:
     async def stop(self) -> None:
         """Graceful shutdown."""
         self._shutting_down = True
+        await self._bg_tasks.shutdown()
         await self._queue.shutdown()
         if self._client:
             await self._client.close()
-        # Clean up active channel file
-        try:
-            if ACTIVE_CHANNEL_FILE.exists():
-                ACTIVE_CHANNEL_FILE.unlink()
-        except Exception:
-            pass
+        # Clean up active channel and webhook temp files
+        for _f in (ACTIVE_CHANNEL_FILE, ACTIVE_WEBHOOK_FILE, ACTIVE_WEBHOOK_NAME_FILE):
+            try:
+                _f.unlink(missing_ok=True)
+            except Exception:
+                pass

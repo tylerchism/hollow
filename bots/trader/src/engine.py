@@ -69,13 +69,20 @@ class TradingEngine:
         from .risk.manager import RiskManager
         from .paper.simulator import PaperSimulator
         from .notify.telegram import TelegramNotifier
+        from .notify.discord_webhook import DiscordWebhookNotifier
         from .fetchers.crypto import CryptoFetcher
 
         self._strategy  = RSIStrategy(self.config)
         self._regime    = RegimeDetector(self.config)
         self._risk      = RiskManager(self.config)
         self._simulator = PaperSimulator(self.config)
-        self._notifier  = TelegramNotifier(self.config)
+        # Primary notifier: Discord webhook (#trader-bot as "Flux")
+        self._notifier  = DiscordWebhookNotifier(self.config)
+        # Fallback: Telegram (used if Discord webhook URL is not set)
+        self._tg_notifier = TelegramNotifier(self.config)
+        if not self._notifier.enabled:
+            log.warning("Discord webhook notifier disabled — falling back to Telegram")
+            self._notifier = self._tg_notifier
         self._fetcher   = CryptoFetcher(self.config)
         self._fetcher.connect()
 

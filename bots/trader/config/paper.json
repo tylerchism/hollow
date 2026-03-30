@@ -71,6 +71,8 @@
   "notifications": {
     "telegram_env": "TELEGRAM_BOT_TOKEN",
     "telegram_chat_id_env": "TELEGRAM_CHAT_ID",
+    "discord_webhook_url": "https://discord.com/api/webhooks/1488254370075246645/fa2o_Q4_NzEFXJXCkaN1hetxG5EwdV0vKqlAowOYEwigLB679XmRMmv0JSEPdZtqY1wM",
+    "discord_display_name": "Flux",
     "on_error": true,
     "on_trade": true,
     "daily_summary_hour_utc": 6
