@@ -1,0 +1,40 @@
+{
+  "mode": "paper",
+  "crypto": {
+    "exchange": "binance",
+    "testnet": true,
+    "api_key_env": "BINANCE_TESTNET_API_KEY",
+    "api_secret_env": "BINANCE_TESTNET_API_SECRET",
+    "symbols": ["BTC/USDT", "ETH/USDT"],
+    "timeframes": ["1m", "5m", "1h"],
+    "ohlcv_limit": 500
+  },
+  "equities": {
+    "provider": "alpaca",
+    "paper": true,
+    "api_key_env": "ALPACA_PAPER_API_KEY",
+    "api_secret_env": "ALPACA_PAPER_API_SECRET",
+    "base_url": "https://paper-api.alpaca.markets",
+    "symbols": ["AAPL", "MSFT", "SPY"],
+    "timeframe": "1Min"
+  },
+  "storage": {
+    "db_path": "~/.local/share/hollow-trader/trader.db"
+  },
+  "ingestion": {
+    "interval_seconds": 60,
+    "retry_attempts": 3,
+    "retry_delay_seconds": 5
+  },
+  "notifications": {
+    "telegram_env": "TELEGRAM_BOT_TOKEN",
+    "telegram_chat_id_env": "TELEGRAM_CHAT_ID",
+    "on_error": true,
+    "on_portfolio_update": false
+  },
+  "pdt": {
+    "tracking_enabled": true,
+    "min_account_value_usd": 25000,
+    "max_day_trades_per_5_days": 3
+  }
+}

@@ -1,0 +1,26 @@
+{
+  "_WARNING": "THIS IS LIVE TRADING. Rename to live.json and set TRADER_LIVE_CONFIRMED=true env var to use.",
+  "_GUARD": "The bot will refuse to run in live mode unless env var TRADER_LIVE_CONFIRMED=true is set.",
+  "mode": "live",
+  "crypto": {
+    "exchange": "binance",
+    "testnet": false,
+    "api_key_env": "BINANCE_LIVE_API_KEY",
+    "api_secret_env": "BINANCE_LIVE_API_SECRET",
+    "symbols": ["BTC/USDT", "ETH/USDT"],
+    "timeframes": ["1m", "5m", "1h"],
+    "ohlcv_limit": 500
+  },
+  "equities": {
+    "provider": "alpaca",
+    "paper": false,
+    "api_key_env": "ALPACA_LIVE_API_KEY",
+    "api_secret_env": "ALPACA_LIVE_API_SECRET",
+    "base_url": "https://api.alpaca.markets",
+    "symbols": ["AAPL", "MSFT", "SPY"],
+    "timeframe": "1Min"
+  },
+  "storage": {
+    "db_path": "~/.local/share/hollow-trader/trader-live.db"
+  }
+}
