@@ -1,39 +1,83 @@
 {
   "mode": "paper",
+
   "crypto": {
     "exchange": "binance",
     "testnet": true,
     "api_key_env": "BINANCE_TESTNET_API_KEY",
     "api_secret_env": "BINANCE_TESTNET_API_SECRET",
     "symbols": ["BTC/USDT", "ETH/USDT"],
-    "timeframes": ["1m", "5m", "1h"],
+    "timeframes": ["4h", "1h", "1m"],
     "ohlcv_limit": 500
   },
+
   "equities": {
     "provider": "alpaca",
     "paper": true,
     "api_key_env": "ALPACA_PAPER_API_KEY",
     "api_secret_env": "ALPACA_PAPER_API_SECRET",
     "base_url": "https://paper-api.alpaca.markets",
-    "symbols": ["AAPL", "MSFT", "SPY"],
+    "symbols": [],
     "timeframe": "1Min"
   },
+
   "storage": {
     "db_path": "~/.local/share/hollow-trader/trader.db"
   },
+
   "ingestion": {
     "interval_seconds": 60,
     "retry_attempts": 3,
     "retry_delay_seconds": 5
   },
+
+  "engine": {
+    "poll_interval_seconds": 900,
+    "symbol": "BTC/USDT",
+    "timeframe": "4h",
+    "connectivity_check": true
+  },
+
+  "strategy": {
+    "rsi": {
+      "symbol": "BTC/USDT",
+      "timeframe": "4h",
+      "period": 14,
+      "oversold": 30.0,
+      "overbought": 70.0,
+      "exit_rsi": 50.0,
+      "candles_needed": 100
+    },
+    "regime": {
+      "enabled": true,
+      "adx_period": 14,
+      "adx_trend_threshold": 25.0
+    }
+  },
+
+  "risk": {
+    "max_position_pct": 0.03,
+    "max_drawdown_pct": 0.05,
+    "max_open_positions": 5,
+    "max_signal_age_seconds": 900,
+    "kill_switch_path": "~/.local/share/hollow-trader/KILL"
+  },
+
+  "paper": {
+    "initial_cash_usd": 10000.0,
+    "slippage_pct": 0.001
+  },
+
   "notifications": {
     "telegram_env": "TELEGRAM_BOT_TOKEN",
     "telegram_chat_id_env": "TELEGRAM_CHAT_ID",
     "on_error": true,
-    "on_portfolio_update": false
+    "on_trade": true,
+    "daily_summary_hour_utc": 6
   },
+
   "pdt": {
-    "tracking_enabled": true,
+    "tracking_enabled": false,
     "min_account_value_usd": 25000,
     "max_day_trades_per_5_days": 3
   }

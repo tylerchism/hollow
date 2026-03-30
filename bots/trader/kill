@@ -1,0 +1,248 @@
+#!/usr/bin/env python3
+"""Kill switch CLI for hollow-trader.
+
+Usage:
+    python bots/trader/kill           # engage kill switch (default)
+    python bots/trader/kill --clear   # clear kill switch (requires manual restart)
+    python bots/trader/kill --status  # check current kill switch state
+
+The kill switch:
+  1. Creates a file at ~/.local/share/hollow-trader/KILL
+  2. The engine checks this file every cycle and halts trading immediately
+  3. Sends a Telegram notification (if configured)
+  4. A DB flag is also set so the kill persists across restarts
+
+To restart after a kill:
+  1. Fix whatever caused the kill
+  2. python bots/trader/kill --clear
+  3. python bots/trader/main.py
+
+Note: Daily drawdown halts auto-clear on a new calendar day.
+Kill switch halts require explicit --clear.
+"""
+
+import argparse
+import json
+import os
+import sys
+from pathlib import Path
+
+BOT_DIR = Path(__file__).parent
+DEFAULT_CONFIG = BOT_DIR / "config" / "paper.json"
+
+
+def load_config(path: Path) -> dict:
+    with open(path) as f:
+        return json.load(f)
+
+
+def get_kill_path(config: dict) -> Path:
+    raw = config.get("risk", {}).get(
+        "kill_switch_path", "~/.local/share/hollow-trader/KILL"
+    )
+    return Path(os.path.expanduser(raw))
+
+
+def get_db_path(config: dict) -> Path:
+    raw = config.get("storage", {}).get(
+        "db_path", "~/.local/share/hollow-trader/trader.db"
+    )
+    return Path(os.path.expanduser(raw))
+
+
+def cmd_engage(config: dict, reason: str) -> None:
+    kill_path = get_kill_path(config)
+    kill_path.parent.mkdir(parents=True, exist_ok=True)
+
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc).isoformat()
+    kill_path.write_text(f"KILLED at {now}: {reason}\n")
+    print(f"Kill switch ENGAGED — file written to {kill_path}")
+    print(f"Reason: {reason}")
+    print()
+    print("The trading engine will halt within one poll cycle (default 15 min).")
+    print("To clear: python bots/trader/kill --clear")
+
+    # Also set DB flag if DB exists
+    db_path = get_db_path(config)
+    if db_path.exists():
+        try:
+            import sqlite3
+            conn = sqlite3.connect(str(db_path))
+            conn.execute("""
+                INSERT INTO risk_state (id, killed, killed_at, killed_reason, last_updated)
+                VALUES (1, 1, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    killed = 1,
+                    killed_at = excluded.killed_at,
+                    killed_reason = excluded.killed_reason,
+                    last_updated = excluded.last_updated
+            """, (now, reason, now))
+            conn.commit()
+            conn.close()
+            print(f"DB kill flag set at {db_path}")
+        except Exception as exc:
+            print(f"WARNING: Could not set DB kill flag: {exc}", file=sys.stderr)
+
+    # Telegram notification
+    _send_telegram(
+        config,
+        f"*** KILL SWITCH ENGAGED (manual) ***\n"
+        f"Reason: {reason}\n"
+        f"Time:   {now}\n"
+        "Trading halted. Manual restart required."
+    )
+
+
+def cmd_clear(config: dict) -> None:
+    kill_path = get_kill_path(config)
+
+    if kill_path.exists():
+        kill_path.unlink()
+        print(f"Kill switch file removed: {kill_path}")
+    else:
+        print(f"No kill switch file found at {kill_path}")
+
+    # Clear DB flag if DB exists
+    db_path = get_db_path(config)
+    if db_path.exists():
+        try:
+            import sqlite3
+            conn = sqlite3.connect(str(db_path))
+            conn.execute(
+                "UPDATE risk_state SET killed = 0, killed_reason = NULL, killed_at = NULL "
+                "WHERE id = 1"
+            )
+            conn.commit()
+            conn.close()
+            print(f"DB kill flag cleared at {db_path}")
+        except Exception as exc:
+            print(f"WARNING: Could not clear DB kill flag: {exc}", file=sys.stderr)
+
+    print()
+    print("Kill switch cleared. Restart the engine:")
+    print("  python bots/trader/main.py")
+
+
+def cmd_status(config: dict) -> None:
+    kill_path = get_kill_path(config)
+    db_path = get_db_path(config)
+
+    print("=== Hollow Trader — Kill Switch Status ===")
+    print()
+
+    # File check
+    if kill_path.exists():
+        content = kill_path.read_text().strip()
+        print(f"FILE:  KILL SWITCH ACTIVE")
+        print(f"       {kill_path}")
+        print(f"       {content}")
+    else:
+        print(f"FILE:  No kill file at {kill_path}")
+
+    print()
+
+    # DB check
+    if not db_path.exists():
+        print(f"DB:    Not found at {db_path}")
+        return
+
+    try:
+        import sqlite3
+        conn = sqlite3.connect(str(db_path))
+        conn.row_factory = sqlite3.Row
+        row = conn.execute("SELECT * FROM risk_state WHERE id = 1").fetchone()
+        conn.close()
+
+        if row is None:
+            print("DB:    risk_state row not yet initialized (engine not started)")
+        else:
+            killed = int(row["killed"])
+            halted = int(row["daily_drawdown_halted"])
+            print(f"DB:    killed={killed}  daily_drawdown_halted={halted}")
+            if killed:
+                print(f"       killed_at={row['killed_at']}")
+                print(f"       reason:   {row['killed_reason']}")
+            if halted:
+                print(f"       halt_date={row['halt_date']}")
+            print(f"       day_start_value=${row['day_start_value_usd']}")
+            print(f"       last_updated={row['last_updated']}")
+    except Exception as exc:
+        print(f"DB:    Error reading {db_path}: {exc}", file=sys.stderr)
+
+
+def _send_telegram(config: dict, text: str) -> None:
+    import json as _json
+    import urllib.request
+    import urllib.error
+
+    notify_cfg = config.get("notifications", {})
+    token_env = notify_cfg.get("telegram_env", "TELEGRAM_BOT_TOKEN")
+    chat_env  = notify_cfg.get("telegram_chat_id_env", "TELEGRAM_CHAT_ID")
+    token     = os.environ.get(token_env, "")
+    chat_id   = os.environ.get(chat_env, "")
+
+    if not (token and chat_id):
+        print("(Telegram not configured — skipping notification)")
+        return
+
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
+    payload = _json.dumps({"chat_id": chat_id, "text": text}).encode()
+    req = urllib.request.Request(url, data=payload, method="POST")
+    req.add_header("Content-Type", "application/json")
+    try:
+        with urllib.request.urlopen(req, timeout=10):
+            print("Telegram notification sent.")
+    except (urllib.error.URLError, OSError) as exc:
+        print(f"WARNING: Telegram notification failed: {exc}", file=sys.stderr)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Hollow Trader kill switch CLI",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=__doc__,
+    )
+    parser.add_argument(
+        "--config",
+        type=Path,
+        default=DEFAULT_CONFIG,
+        help="Path to config JSON (default: config/paper.json)",
+    )
+    parser.add_argument(
+        "--clear",
+        action="store_true",
+        help="Clear the kill switch and allow manual restart",
+    )
+    parser.add_argument(
+        "--status",
+        action="store_true",
+        help="Show current kill switch state without changing it",
+    )
+    parser.add_argument(
+        "--reason",
+        default="manual kill via CLI",
+        help="Reason to log when engaging kill switch",
+    )
+    args = parser.parse_args()
+
+    config_path = args.config
+    if not config_path.is_absolute():
+        config_path = BOT_DIR / config_path
+
+    if not config_path.exists():
+        print(f"ERROR: Config file not found: {config_path}", file=sys.stderr)
+        sys.exit(1)
+
+    config = load_config(config_path)
+
+    if args.status:
+        cmd_status(config)
+    elif args.clear:
+        cmd_clear(config)
+    else:
+        cmd_engage(config, args.reason)
+
+
+if __name__ == "__main__":
+    main()
