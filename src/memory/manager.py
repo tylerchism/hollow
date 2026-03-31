@@ -14,7 +14,7 @@ from .session import SessionLogger
 log = logging.getLogger(__name__)
 
 # Core files loaded into every context
-ALWAYS_LOAD = ["soul.md", "identity.md", "user.md", "agents.md"]
+ALWAYS_LOAD = ["soul.md", "identity.md", "user.md", "agents.md", "tools.md"]
 # Files only loaded in main sessions
 MAIN_SESSION_ONLY = ["memory.md", "project_state.md", "heartbeat.md"]
 
@@ -142,7 +142,7 @@ class MemoryManager:
 
         For soul.md and identity.md, checks identity_dir first (if configured).
         """
-        if filename in ("soul.md", "identity.md") and self.config.identity_dir:
+        if filename in ("soul.md", "identity.md", "tools.md") and self.config.identity_dir:
             override = self.config.identity_dir / filename
             if override.exists():
                 return override.read_text(encoding="utf-8")
