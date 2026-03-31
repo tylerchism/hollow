@@ -284,6 +284,25 @@ class DiscordBot:
         await self._send_chunked(channel, text)
         return True
 
+    async def post_to_log(self, message: str) -> bool:
+        """Post a message to the trading log channel (one-way write, no response).
+
+        Reads TRADING_LOG_CHANNEL from the environment (default: "trading-log").
+        Returns True if the message was sent to at least one guild, False otherwise.
+        """
+        channel_name = os.getenv("TRADING_LOG_CHANNEL", "trading-log").strip()
+        if not self._client:
+            log.warning("post_to_log: Discord client not ready, dropping message")
+            return False
+        sent_any = False
+        for guild in self._client.guilds:
+            sent = await self.send_to_named_channel(guild, channel_name, message)
+            if sent:
+                sent_any = True
+        if not sent_any:
+            log.warning("post_to_log: channel #%s not found on any guild", channel_name)
+        return sent_any
+
     def get_tarn_chat_ids(self) -> list[tuple[str, "discord.TextChannel"]]:
         """Return (chat_id_str, channel) for every 'tarn' channel across all guilds."""
         if not self._client:
@@ -294,6 +313,53 @@ class DiscordBot:
             if channel is not None:
                 results.append((str(channel.id), channel))
         return results
+
+    async def get_channel_history(self, channel_name: str, limit: int = 50) -> str:
+        """Fetch recent message history from a named Discord channel.
+
+        Searches all guilds for a text channel matching channel_name (case-insensitive).
+        Returns a formatted string of recent messages, oldest first.
+        Silent-channel status does NOT block reading — this method is for explicit
+        history lookups, not automatic responses.
+
+        Args:
+            channel_name: The channel name to look up (e.g. "trader-bot").
+            limit: Maximum number of messages to fetch (default 50, max 100).
+
+        Returns:
+            Formatted string with messages, or an error/empty message string.
+        """
+        if not self._client:
+            return "Discord client is not connected."
+
+        limit = max(1, min(limit, 100))
+        channel_name_lower = channel_name.lower().lstrip("#")
+
+        target_channel = None
+        for guild in self._client.guilds:
+            ch = discord.utils.get(guild.text_channels, name=channel_name_lower)
+            if ch is not None:
+                target_channel = ch
+                break
+
+        if target_channel is None:
+            return f"Channel #{channel_name_lower} not found on any guild."
+
+        try:
+            messages = []
+            async for msg in target_channel.history(limit=limit, oldest_first=True):
+                ts = msg.created_at.strftime("%Y-%m-%d %H:%M:%S UTC")
+                author = msg.author.display_name or msg.author.name
+                content = msg.content or "(no text)"
+                messages.append(f"[{ts}] {author}: {content}")
+            if not messages:
+                return f"No messages found in #{channel_name_lower}."
+            return "\n".join(messages)
+        except discord.Forbidden:
+            return f"Missing permissions to read #{channel_name_lower}."
+        except Exception as exc:
+            log.exception("get_channel_history: error fetching #%s", channel_name_lower)
+            return f"Error fetching history for #{channel_name_lower}: {exc}"
 
     async def _send_chunked(self, channel, text: str) -> None:
         """Send text to a channel, splitting at Discord's 2000-char limit."""

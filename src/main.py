@@ -82,9 +82,36 @@ def make_api_app(
             log.exception("Error in /ask handler")
             return web.json_response({"error": str(e)}, status=500)
 
+    async def handle_history(request: web.Request) -> web.Response:
+        """Return recent message history for a named Discord channel.
+
+        GET /history/<channel_name>?limit=50
+
+        channel_name: Discord channel to read (e.g. "trader-bot")
+        limit: number of messages to return, 1-100 (default 50)
+
+        Returns plain text — one line per message, oldest first:
+          [YYYY-MM-DD HH:MM:SS UTC] Author: message text
+        """
+        channel_name = request.match_info.get("channel_name", "").strip()
+        if not channel_name:
+            return web.Response(text="channel_name is required", status=400)
+
+        try:
+            limit = int(request.rel_url.query.get("limit", "50"))
+        except ValueError:
+            limit = 50
+
+        if discord_bot is None:
+            return web.Response(text="Discord bot is not enabled on this agent.", status=503)
+
+        history_text = await discord_bot.get_channel_history(channel_name, limit=limit)
+        return web.Response(text=history_text, content_type="text/plain")
+
     app = web.Application()
     app.router.add_get("/health", handle_health)
     app.router.add_post("/ask", handle_ask)
+    app.router.add_get("/history/{channel_name}", handle_history)
     return app
 
 
@@ -249,6 +276,12 @@ def check_setup(config, require_telegram: bool = True) -> list[str]:
 
 async def _send_startup_notification(config, agent, bot, discord_bot) -> None:
     """On restart: review recent context per-channel and proactively continue work."""
+    import os
+
+    # Maintenance restarts are quiet — skip full re-orientation to avoid noise.
+    restart_reason = os.environ.get("TARN_RESTART_REASON", "").strip().lower()
+    is_maintenance = restart_reason == "maintenance"
+
     # Startup is a read-only context review — block Bash so the agent cannot
     # execute shell commands (restart-tarn, kill, pkill, etc.) while booting.
     from src.agent import NATIVE_TOOLS
@@ -264,6 +297,21 @@ async def _send_startup_notification(config, agent, bot, discord_bot) -> None:
             log.warning("Discord ready_event timed out after 30s — proceeding with startup notification anyway")
     else:
         await asyncio.sleep(8)
+
+    # Maintenance restart: post a minimal one-liner to Discord #tarn only.
+    # No Telegram, no context re-evaluation.
+    if is_maintenance:
+        log.info("Maintenance restart detected — sending minimal notification to Discord only")
+        if discord_bot and discord_bot._client:
+            for discord_chat_id, tarn_channel in discord_bot.get_tarn_chat_ids():
+                try:
+                    await discord_bot._send_chunked(
+                        tarn_channel,
+                        "🔧 Maintenance restart complete. Crons reloaded.",
+                    )
+                except Exception:
+                    log.exception("Failed to send maintenance restart notification to Discord channel %s", discord_chat_id)
+        return
 
     ping = "I'm back — reviewing context and picking up where we left off..."
 

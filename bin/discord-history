@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# discord-history — Fetch recent message history from a Discord channel.
+#
+# Usage: discord-history <channel_name> [limit]
+#
+# channel_name: Discord channel to read (e.g. "trader-bot", "tarn")
+# limit:        Number of messages to return, 1-100 (default 50)
+#
+# Hits Tarn's HTTP API at http://127.0.0.1:18800/history/<channel_name>
+# Returns one line per message, oldest first:
+#   [YYYY-MM-DD HH:MM:SS UTC] Author: message text
+#
+# Works for silent channels too — this is a read-only lookup, not a response.
+# Example:
+#   discord-history trader-bot
+#   discord-history trader-bot 20
+
+set -euo pipefail
+
+if [[ $# -lt 1 ]]; then
+    echo "Usage: discord-history <channel_name> [limit]" >&2
+    exit 1
+fi
+
+CHANNEL="$1"
+LIMIT="${2:-50}"
+TARN_PORT="${TARN_PORT:-18800}"
+
+curl -sf "http://127.0.0.1:${TARN_PORT}/history/${CHANNEL}?limit=${LIMIT}"

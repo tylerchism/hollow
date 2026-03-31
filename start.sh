@@ -45,7 +45,7 @@ def port_in_use(port):
             return False
 
 
-def launch(name, port, identity_dir, memory_dir, model=None):
+def launch(name, port, identity_dir, memory_dir, data_dir, model=None):
     if port_in_use(port):
         print(f"  WARNING: port {port} already in use — {name} may already be running")
         return None
@@ -54,6 +54,7 @@ def launch(name, port, identity_dir, memory_dir, model=None):
         "--port", str(port),
         "--identity-dir", str(identity_dir),
         "--memory-dir", str(memory_dir),
+        "--data-dir", str(data_dir),
     ]
     env = os.environ.copy()
     env["USER_TIMEZONE"] = user_tz
@@ -95,8 +96,10 @@ if not coord_memory.exists():
     print("  Run 'python setup.py' to generate agent memory directories.")
     sys.exit(1)
 
+coord_data = hollow_root / "data" / coord_name
+coord_data.mkdir(parents=True, exist_ok=True)
 print(f"Coordinator: {coord_name}")
-p = launch(coord_name, coord_port, coord_identity, coord_memory, model=coord_model)
+p = launch(coord_name, coord_port, coord_identity, coord_memory, coord_data, model=coord_model)
 if p:
     procs.append(p)
 time.sleep(1)
@@ -117,7 +120,9 @@ for agent in agents:
         print(f"  WARNING: memory directory not found for {name}: {memory_dir} — skipping")
         continue
 
-    p = launch(name, port, identity_dir, memory_dir, model=model)
+    data_dir = hollow_root / "data" / name
+    data_dir.mkdir(parents=True, exist_ok=True)
+    p = launch(name, port, identity_dir, memory_dir, data_dir, model=model)
     if p:
         procs.append(p)
 
