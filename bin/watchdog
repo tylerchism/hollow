@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+from __future__ import annotations
 """
 watchdog — Ping all hollow agents, send Telegram alert if any are unresponsive.
 
@@ -25,6 +27,7 @@ import urllib.request
 import urllib.error
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Optional
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
@@ -69,7 +72,7 @@ def load_env(path: Path) -> dict:
     return env
 
 
-def get_telegram_token() -> str | None:
+def get_telegram_token() -> Optional[str]:
     env = load_env(TARN_ENV)
     return env.get("TELEGRAM_BOT_TOKEN")
 
@@ -146,7 +149,7 @@ def in_cooldown(state: dict, name: str) -> bool:
     return elapsed < (COOLDOWN_MINUTES * 60)
 
 
-def check_bot_health(name: str, port: int, token: str | None, chat_id: int) -> None:
+def check_bot_health(name: str, port: int, token: Optional[str], chat_id: int) -> None:
     """After a successful restart, verify bots are connected; alert if not."""
     _, _, bots = ping_agent(name, port)
     if not bots:
@@ -165,7 +168,7 @@ def check_bot_health(name: str, port: int, token: str | None, chat_id: int) -> N
         send_telegram(token, chat_id, msg)
 
 
-def try_restart(name: str, port: int, token: str | None = None, chat_id: int = TYLER_CHAT_ID) -> bool:
+def try_restart(name: str, port: int, token: Optional[str] = None, chat_id: int = TYLER_CHAT_ID) -> bool:
     """
     Attempt to restart a dead agent by re-running start.sh for that agent only.
     This is best-effort — if start.sh doesn't support single-agent mode yet, it logs and skips.
