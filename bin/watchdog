@@ -228,8 +228,11 @@ def try_restart(name: str, port: int, token: Optional[str] = None, chat_id: int 
     model = agent_cfg.get("model", env.get("PRIMARY_MODEL", "claude-sonnet-4-6"))
     env["PRIMARY_MODEL"] = model
 
+    # Use absolute path to uv — system cron has a stripped PATH and won't find
+    # uv via PATH lookup. /home/tchism/.local/bin/uv is the installed location.
+    UV_BIN = "/home/tchism/.local/bin/uv"
     cmd = [
-        "uv", "run", "python", "-m", "src.main",
+        UV_BIN, "run", "python", "-m", "src.main",
         "--port", str(port),
         "--identity-dir", str(identity_dir),
         "--memory-dir", str(memory_dir),
