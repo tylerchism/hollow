@@ -1,0 +1,8 @@
+# Journal service dependencies — all satisfied by hollow's pyproject.toml venv.
+# No additional packages are required beyond what is already listed there.
+#
+# Runtime deps used:
+#   aiohttp>=3.13.3   (web framework)
+#   python-dotenv>=1.2.2  (optional, not imported but present)
+#
+# All stdlib modules used: json, logging, re, sqlite3, uuid, zoneinfo, sys, pathlib
