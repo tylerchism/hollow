@@ -55,6 +55,61 @@ DEDUP_TTL_SECS = 300
 ACTIVE_CHANNEL_FILE = pathlib.Path(tempfile.gettempdir()) / "tarn_active_discord_channel"
 
 
+def _split_for_discord(text: str, limit: int = DISCORD_MSG_LIMIT) -> list[str]:
+    """Split text into chunks no longer than *limit* chars.
+
+    Splitting priority (highest to lowest):
+      1. Paragraph breaks (double newline) — preserves visual structure.
+      2. Sentence-ending punctuation followed by a space.
+      3. Single newline.
+      4. Hard cut at *limit* (last resort — avoids mid-word cuts where possible).
+
+    Each returned chunk is non-empty and stripped of leading/trailing whitespace.
+    """
+    if len(text) <= limit:
+        return [text] if text else []
+
+    chunks: list[str] = []
+
+    while len(text) > limit:
+        window = text[:limit]
+
+        # 1. Paragraph break — find the last \n\n within the window.
+        idx = window.rfind("\n\n")
+        if idx > 0:
+            chunks.append(text[:idx].rstrip())
+            text = text[idx:].lstrip("\n")
+            continue
+
+        # 2. Sentence boundary — look for ". ", "! ", "? " (or same before \n).
+        best = -1
+        for punct in (". ", "! ", "? ", ".\n", "!\n", "?\n"):
+            pos = window.rfind(punct)
+            if pos > best:
+                best = pos
+        if best > 0:
+            cut = best + 2  # include the punctuation character + space
+            chunks.append(text[:cut].rstrip())
+            text = text[cut:].lstrip()
+            continue
+
+        # 3. Single newline.
+        idx = window.rfind("\n")
+        if idx > 0:
+            chunks.append(text[:idx].rstrip())
+            text = text[idx:].lstrip("\n")
+            continue
+
+        # 4. Last resort — hard cut at limit.
+        chunks.append(text[:limit])
+        text = text[limit:]
+
+    if text:
+        chunks.append(text)
+
+    return [c for c in chunks if c]
+
+
 class MessageQueue:
     """Per-channel sequential message processing queue (mirrors telegram.py)."""
 
@@ -149,7 +204,6 @@ async def _send_webhook(webhook_url: str, text: str, username: str) -> None:
     """POST a message to a Discord webhook as the given username."""
     import asyncio
     loop = asyncio.get_running_loop()
-    discord_msg_limit = 2000
 
     def _post_chunk(chunk: str) -> None:
         payload = json.dumps({"content": chunk, "username": username}).encode()
@@ -164,7 +218,7 @@ async def _send_webhook(webhook_url: str, text: str, username: str) -> None:
             log.exception("Webhook POST error")
 
     text = str(text)
-    chunks = [text[i: i + discord_msg_limit] for i in range(0, len(text), discord_msg_limit)] if text else [""]
+    chunks = _split_for_discord(text) if text else [""]
     for chunk in chunks:
         await loop.run_in_executor(None, _post_chunk, chunk)
 
@@ -362,13 +416,15 @@ class DiscordBot:
             return f"Error fetching history for #{channel_name_lower}: {exc}"
 
     async def _send_chunked(self, channel, text: str) -> None:
-        """Send text to a channel, splitting at Discord's 2000-char limit."""
+        """Send text to a channel, splitting at Discord's 2000-char limit.
+
+        Splits are made at paragraph breaks (double newlines) when possible,
+        then at sentence-ending punctuation, then at single newlines, and
+        finally at the hard character limit as a last resort.
+        """
         text = str(text)
-        if len(text) <= DISCORD_MSG_LIMIT:
-            await channel.send(text)
-        else:
-            for i in range(0, len(text), DISCORD_MSG_LIMIT):
-                await channel.send(text[i : i + DISCORD_MSG_LIMIT])
+        for chunk in _split_for_discord(text):
+            await channel.send(chunk)
 
     # ─── Attachment download ──────────────────────────────────────────────────
 
