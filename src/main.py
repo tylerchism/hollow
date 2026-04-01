@@ -212,10 +212,13 @@ def setup_scheduler(
                         discord_ts_file.unlink()
 
                 try:
-                    response = await agent.reply(
-                        message=_prompt,
-                        chat_id=_chat_id,
-                        is_main_session=_is_main,
+                    response = await asyncio.wait_for(
+                        agent.reply(
+                            message=_prompt,
+                            chat_id=_chat_id,
+                            is_main_session=_is_main,
+                        ),
+                        timeout=900,
                     )
                 finally:
                     if saved_tg_chat_id is not None:
