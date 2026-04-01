@@ -37,10 +37,14 @@ TARN_ENV      = HOLLOW_ROOT / "agents" / "tarn" / ".env"
 PID_FILE      = HOLLOW_ROOT / ".hollow.pids"
 LOG_DIR       = HOLLOW_ROOT / "data"
 STATE_FILE    = Path("/tmp/hollow-watchdog-state.json")
+LOCK_FILE     = Path("/tmp/hollow-watchdog.lock")
 
 HEALTH_TIMEOUT  = 5       # seconds per agent health check
 COOLDOWN_MINUTES = 15     # don't re-alert same agent within this window
 TYLER_CHAT_ID   = 0  # static fallback — set HEARTBEAT_CHAT_ID in agents/tarn/.env
+# Maximum age (seconds) of a stale lock before we override it.
+# This should exceed the worst-case single-run time (9 agents × 5s timeout + 15s restart wait).
+LOCK_MAX_AGE_SEC = 180
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -268,12 +272,71 @@ def try_restart(name: str, port: int, token: Optional[str] = None, chat_id: int 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
+def acquire_lock() -> bool:
+    """
+    Try to acquire an exclusive run lock using a PID file.
+
+    Returns True if the lock was acquired (caller should proceed and release it).
+    Returns False if another instance is already running (caller should exit).
+
+    A stale lock older than LOCK_MAX_AGE_SEC is forcibly cleared so a crashed
+    watchdog doesn't block future runs forever.
+    """
+    if LOCK_FILE.exists():
+        try:
+            content = LOCK_FILE.read_text().strip()
+            parts   = content.split()
+            pid     = int(parts[0]) if parts else 0
+            age     = time.time() - LOCK_FILE.stat().st_mtime
+        except Exception:
+            # Unreadable lock — treat as stale
+            age, pid = LOCK_MAX_AGE_SEC + 1, 0
+
+        if age < LOCK_MAX_AGE_SEC:
+            # Check if the PID is actually running
+            if pid and os.path.exists(f"/proc/{pid}"):
+                log(f"Another watchdog instance is running (pid={pid}, age={age:.0f}s) — exiting.")
+                return False
+            # PID is gone but lock is young; treat as stale (crashed process)
+            log(f"Stale lock from dead pid={pid} (age={age:.0f}s) — overriding.")
+        else:
+            log(f"Stale lock older than {LOCK_MAX_AGE_SEC}s (age={age:.0f}s) — overriding.")
+
+    # Write our PID to the lock file
+    try:
+        LOCK_FILE.write_text(f"{os.getpid()}\n")
+    except Exception as e:
+        log(f"WARNING: could not write lock file {LOCK_FILE}: {e} — proceeding anyway")
+    return True
+
+
+def release_lock() -> None:
+    """Remove the lock file if it still belongs to us."""
+    try:
+        if LOCK_FILE.exists():
+            content = LOCK_FILE.read_text().strip().split()
+            if content and int(content[0]) == os.getpid():
+                LOCK_FILE.unlink()
+    except Exception:
+        pass  # Non-fatal
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Hollow agent watchdog")
     parser.add_argument("--restart", action="store_true", help="Attempt to restart dead agents")
     parser.add_argument("--once",    action="store_true", help="Bypass cooldown, always alert")
     args = parser.parse_args()
 
+    if not acquire_lock():
+        return
+
+    try:
+        _main(args)
+    finally:
+        release_lock()
+
+
+def _main(args) -> None:
     cfg     = load_config()
     token   = get_telegram_token()
     chat_id = get_heartbeat_chat_id()

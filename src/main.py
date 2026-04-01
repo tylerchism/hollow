@@ -274,6 +274,31 @@ def check_setup(config, require_telegram: bool = True) -> list[str]:
     return issues
 
 
+async def _channel_already_responded(agent, chat_id: str, elapsed_seconds: float) -> bool:
+    """Return True if the agent already sent an assistant reply in this channel
+    within the last `elapsed_seconds + 120` seconds.
+
+    Used during startup to detect channels where the user manually messaged
+    Tarn before the startup notification loop got to them, causing Tarn to
+    reply naturally — so we skip the automated startup context review to
+    avoid sending a duplicate message.
+    """
+    try:
+        import time as _time
+        # Look back far enough to cover the time since startup began, plus a buffer.
+        lookback = max(int(elapsed_seconds) + 120, 300)
+        cutoff = _time.time() - lookback
+        cursor = await agent.history._db.execute(
+            "SELECT role FROM chat_sessions WHERE chat_id = ? AND role = 'assistant' AND created_at >= ? ORDER BY created_at DESC LIMIT 1",
+            (chat_id, cutoff),
+        )
+        row = await cursor.fetchone()
+        return row is not None
+    except Exception:
+        log.debug("_channel_already_responded: could not check history for %s", chat_id, exc_info=True)
+    return False
+
+
 async def _send_startup_notification(config, agent, bot, discord_bot) -> None:
     """On restart: review recent context per-channel and proactively continue work."""
     import os
@@ -361,12 +386,30 @@ async def _send_startup_notification(config, agent, bot, discord_bot) -> None:
                 pass
 
     # ── Discord ───────────────────────────────────────────────────────────────
+    # Track the timestamp when this startup notification began. Any channel
+    # that already has an assistant response AFTER this timestamp has already
+    # been handled (e.g. the user messaged manually before the startup loop
+    # got to that guild) — skip the AI review to avoid a double-message.
+    startup_began_at = asyncio.get_event_loop().time()
+
     if discord_bot and discord_bot._client:
         for discord_chat_id, tarn_channel in discord_bot.get_tarn_chat_ids():
             try:
                 await discord_bot._send_chunked(tarn_channel, ping)
             except Exception:
                 log.exception("Failed to send Discord startup ping to channel %s", discord_chat_id)
+
+            # If there's already a recent assistant reply in this channel's session
+            # (posted after startup began), the user manually re-engaged and Tarn
+            # already responded — skip the automated context review to avoid doubling.
+            elapsed = asyncio.get_event_loop().time() - startup_began_at
+            if await _channel_already_responded(agent, discord_chat_id, elapsed):
+                log.info(
+                    "Startup: Discord channel %s already has a recent reply — skipping duplicate context review",
+                    discord_chat_id,
+                )
+                continue
+
             try:
                 response = await asyncio.wait_for(
                     agent.reply(
