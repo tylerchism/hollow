@@ -1,0 +1,131 @@
+#!/usr/bin/env bash
+# send_discord_file — Upload a file to a named Discord channel.
+#
+# Usage: send_discord_file <channel-name> <filepath> [message]
+#
+# Posts a file as a Discord attachment to the named channel. The optional
+# message is displayed above the attachment.
+#
+# The bot token is read from agents/tarn/.env. The channel is looked up by
+# name across all guilds the bot belongs to.
+#
+# Example:
+#   send_discord_file "content" "/tmp/draft.md" "New content ready for review: Soil Semiconductor"
+#   send_discord_file "content" "/tmp/edited.md"
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+HOLLOW_ROOT="$(dirname "$SCRIPT_DIR")"
+TARN_ENV="$HOLLOW_ROOT/agents/tarn/.env"
+
+if [[ $# -lt 2 ]]; then
+    echo "Usage: send_discord_file <channel-name> <filepath> [message]" >&2
+    exit 1
+fi
+
+CHANNEL_NAME="$1"
+FILEPATH="$2"
+MESSAGE="${3:-}"
+
+if [[ ! -f "$FILEPATH" ]]; then
+    echo "send_discord_file: file not found: $FILEPATH" >&2
+    exit 1
+fi
+
+# Load DISCORD_BOT_TOKEN from tarn's .env
+if [[ ! -f "$TARN_ENV" ]]; then
+    echo "send_discord_file: tarn .env not found at $TARN_ENV" >&2
+    exit 1
+fi
+
+TOKEN=""
+while IFS= read -r line || [[ -n "$line" ]]; do
+    line="${line#"${line%%[![:space:]]*}"}"
+    [[ "$line" =~ ^# ]] && continue
+    [[ "$line" =~ ^DISCORD_BOT_TOKEN=(.+)$ ]] && TOKEN="${BASH_REMATCH[1]}" && break
+done < "$TARN_ENV"
+
+if [[ -z "$TOKEN" ]]; then
+    echo "send_discord_file: DISCORD_BOT_TOKEN not found in $TARN_ENV" >&2
+    exit 1
+fi
+
+# Fetch guilds the bot belongs to
+GUILDS_JSON="$(curl -s \
+    "https://discord.com/api/v10/users/@me/guilds" \
+    -H "Authorization: Bot ${TOKEN}")"
+
+GUILD_IDS="$(echo "$GUILDS_JSON" | python3 -c "
+import json, sys
+guilds = json.load(sys.stdin)
+if isinstance(guilds, list):
+    for g in guilds:
+        print(g['id'])
+" 2>/dev/null || true)"
+
+if [[ -z "$GUILD_IDS" ]]; then
+    echo "send_discord_file: bot is not in any guilds, or failed to fetch guilds" >&2
+    echo "  API response: $GUILDS_JSON" >&2
+    exit 1
+fi
+
+SENT=false
+CHANNEL_NAME_LOWER="${CHANNEL_NAME,,}"
+
+for GUILD_ID in $GUILD_IDS; do
+    # Fetch channels for this guild
+    CHANNELS_JSON="$(curl -s \
+        "https://discord.com/api/v10/guilds/${GUILD_ID}/channels" \
+        -H "Authorization: Bot ${TOKEN}")"
+
+    CHANNEL_ID="$(echo "$CHANNELS_JSON" | python3 -c "
+import json, sys
+channels = json.load(sys.stdin)
+target = sys.argv[1].lower()
+if isinstance(channels, list):
+    for ch in channels:
+        if ch.get('type') == 0 and ch.get('name', '').lower() == target:
+            print(ch['id'])
+            break
+" "$CHANNEL_NAME_LOWER" 2>/dev/null || true)"
+
+    if [[ -z "$CHANNEL_ID" ]]; then
+        continue
+    fi
+
+    # Build multipart form upload
+    FILENAME="$(basename "$FILEPATH")"
+
+    # Build curl args for multipart upload
+    CURL_ARGS=(
+        -s -X POST
+        "https://discord.com/api/v10/channels/${CHANNEL_ID}/messages"
+        -H "Authorization: Bot ${TOKEN}"
+        -F "files[0]=@${FILEPATH};filename=${FILENAME}"
+    )
+
+    # Add message payload JSON if there's a message
+    if [[ -n "$MESSAGE" ]]; then
+        PAYLOAD_JSON="$(python3 -c "import json,sys; print(json.dumps({'content': sys.argv[1]}))" "$MESSAGE")"
+        CURL_ARGS+=(-F "payload_json=${PAYLOAD_JSON}")
+    fi
+
+    RESPONSE="$(curl "${CURL_ARGS[@]}")"
+
+    OK="$(echo "$RESPONSE" | python3 -c "import json,sys; d=json.load(sys.stdin); print('true' if 'id' in d else 'false')" 2>/dev/null || echo "false")"
+
+    if [[ "$OK" == "true" ]]; then
+        SENT=true
+        break
+    else
+        echo "send_discord_file: Discord API error for channel #${CHANNEL_NAME} (id=${CHANNEL_ID}): $RESPONSE" >&2
+    fi
+done
+
+if [[ "$SENT" != "true" ]]; then
+    echo "send_discord_file: channel '#${CHANNEL_NAME}' not found on any guild the bot belongs to" >&2
+    exit 1
+fi
+
+exit 0
