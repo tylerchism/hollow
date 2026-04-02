@@ -322,6 +322,7 @@ async def _send_startup_notification(config, agent, bot, discord_bot) -> None:
     if discord_bot:
         try:
             await asyncio.wait_for(discord_bot._ready_event.wait(), timeout=30)
+            await asyncio.sleep(2)
         except asyncio.TimeoutError:
             log.warning("Discord ready_event timed out after 30s — proceeding with startup notification anyway")
     else:

@@ -363,7 +363,10 @@ class DiscordBot:
             return []
         results = []
         for guild in self._client.guilds:
-            channel = discord.utils.get(guild.text_channels, name=self.config.discord_channel_name)
+            channel = next(
+                (ch for ch in guild.text_channels if ch.name.lower() == self.config.discord_channel_name.lower()),
+                None,
+            )
             if channel is not None:
                 results.append((str(channel.id), channel))
         return results
@@ -771,14 +774,12 @@ class DiscordBot:
                     _content=content,
                     _channel_id=channel_id,
                     _routing=routing,
-                    _discord_channel=message.channel,
                 ):
-                    async with _discord_channel.typing():
-                        response = await _post_to_agent(
-                            port=_routing["port"],
-                            message=_content,
-                            chat_id=_channel_id,
-                        )
+                    response = await _post_to_agent(
+                        port=_routing["port"],
+                        message=_content,
+                        chat_id=_channel_id,
+                    )
                     if response and response.strip():
                         await _send_webhook(
                             webhook_url=_routing["webhook_url"],
