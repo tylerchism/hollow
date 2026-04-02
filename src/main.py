@@ -212,45 +212,92 @@ def setup_scheduler(
                         saved_discord_ts = discord_ts_file.read_text()
                         discord_ts_file.unlink()
 
-                try:
-                    response = await asyncio.wait_for(
-                        agent.reply(
-                            message=_prompt,
-                            chat_id=_chat_id,
-                            is_main_session=_is_main,
-                        ),
-                        timeout=900,
+                # Build reply task without wait_for — task is never cancelled on timeout.
+                # Matches the discord/telegram channel pattern: wait up to 900s, then
+                # hand off to BackgroundTaskManager for delivery when it finishes.
+                reply_task = asyncio.create_task(
+                    agent.reply(
+                        message=_prompt,
+                        chat_id=_chat_id,
+                        is_main_session=_is_main,
                     )
+                )
+
+                async def _deliver_cron(result: str) -> None:
+                    """Deliver cron result — same path whether on-time or background."""
+                    if not result:
+                        return
+                    log.info("Cron job '%s' delivering (%d chars)", _name, len(result))
+                    if _notify and bot and agent.config.heartbeat_chat_id:
+                        await bot.send_message(agent.config.heartbeat_chat_id, result)
+                    if discord_bot and discord_bot._client and (
+                        _notify_discord or _discord_channel_name
+                    ):
+                        if _discord_channel_name:
+                            sent_any = False
+                            for guild in discord_bot._client.guilds:
+                                sent = await discord_bot.send_to_named_channel(
+                                    guild, _discord_channel_name, result
+                                )
+                                sent_any = sent_any or sent
+                            if not sent_any:
+                                log.warning(
+                                    "Cron '%s': Discord channel '#%s' not found on any guild",
+                                    _name, _discord_channel_name,
+                                )
+                        elif _notify_discord and agent.config.heartbeat_chat_id:
+                            await discord_bot.send_message(
+                                agent.config.heartbeat_chat_id, result
+                            )
+
+                try:
+                    finished, _ = await asyncio.wait({reply_task}, timeout=900)
                 finally:
+                    # Restore active-channel markers regardless of outcome
                     if saved_tg_chat_id is not None:
                         tg_active_file.write_text(saved_tg_chat_id)
                     if saved_discord_channel is not None:
                         discord_channel_file.write_text(saved_discord_channel)
                     if saved_discord_ts is not None:
                         discord_ts_file.write_text(saved_discord_ts)
-                log.info("Cron job '%s' completed (%d chars)", _name, len(response))
 
-                if _notify and bot and agent.config.heartbeat_chat_id:
-                    await bot.send_message(agent.config.heartbeat_chat_id, response)
+                if reply_task in finished:
+                    exc = reply_task.exception()
+                    if exc is not None:
+                        raise exc
+                    response = reply_task.result()
+                    log.info("Cron job '%s' completed (%d chars)", _name, len(response))
+                    await _deliver_cron(response)
+                else:
+                    # Still running past 900s — hand off to BackgroundTaskManager.
+                    _bg = (
+                        discord_bot._bg_tasks if discord_bot is not None
+                        else bot._bg_tasks if bot is not None
+                        else None
+                    )
+                    if _bg is not None:
+                        log.info(
+                            "Cron job '%s' still running after 900s — handing off to BackgroundTaskManager",
+                            _name,
+                        )
 
-                if discord_bot and discord_bot._client and (_notify_discord or _discord_channel_name):
-                    if _discord_channel_name:
-                        # Try to post to the named channel on every guild
-                        sent_any = False
-                        for guild in discord_bot._client.guilds:
-                            sent = await discord_bot.send_to_named_channel(
-                                guild, _discord_channel_name, response
-                            )
-                            sent_any = sent_any or sent
-                        if not sent_any:
-                            log.warning(
-                                "Cron '%s': Discord channel '#%s' not found on any guild",
-                                _name,
-                                _discord_channel_name,
-                            )
-                    elif _notify_discord and agent.config.heartbeat_chat_id:
-                        # Fall back to heartbeat channel ID if no channel name given
-                        await discord_bot.send_message(agent.config.heartbeat_chat_id, response)
+                        async def _cron_error(exc: Exception) -> None:
+                            log.error("Cron job '%s' background task raised: %s", _name, exc)
+
+                        _bg.register(
+                            task=reply_task,
+                            deliver_fn=_deliver_cron,
+                            error_fn=_cron_error,
+                            channel_type="cron",
+                            channel_id=_chat_id,
+                            original_message=_prompt,
+                        )
+                    else:
+                        log.warning(
+                            "Cron job '%s' timed out after 900s and no BackgroundTaskManager "
+                            "available — result will be lost",
+                            _name,
+                        )
             except Exception:
                 log.exception("Cron job '%s' failed", _name)
 
