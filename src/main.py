@@ -27,6 +27,49 @@ def make_api_app(
 ) -> web.Application:
     """Create the aiohttp app for the HTTP API."""
 
+    import time as _time
+
+    # Claude API probe cache: (result_ok: bool, reason: str, checked_at: float)
+    # TTL of 5 minutes so watchdog polls (every 5 min) don't hammer the API.
+    _claude_probe_cache: list = [None, "", 0.0]
+    _CLAUDE_PROBE_TTL = 300
+
+    async def _probe_claude_api() -> tuple[bool, str]:
+        """Send a minimal probe to the Claude API to verify reachability.
+
+        Returns (ok, reason).  Uses claude_code_sdk (same transport the agent
+        uses) with max_turns=1 so the call is as cheap as possible.
+        Result is cached for _CLAUDE_PROBE_TTL seconds.
+        """
+        now = _time.time()
+        if _claude_probe_cache[0] is not None and now - _claude_probe_cache[2] < _CLAUDE_PROBE_TTL:
+            return _claude_probe_cache[0], _claude_probe_cache[1]
+
+        try:
+            from claude_code_sdk import (
+                query as _sdk_query,
+                ClaudeCodeOptions as _CCO,
+                AssistantMessage as _AM,
+            )
+            options = _CCO(
+                model="claude-haiku-4-5",
+                max_turns=1,
+                permission_mode="bypassPermissions",
+            )
+            got_response = False
+            async for msg in _sdk_query(prompt="Reply with exactly: ok", options=options):
+                if isinstance(msg, _AM):
+                    got_response = True
+            ok = got_response
+            reason = "" if ok else "no response from claude CLI"
+        except Exception as e:
+            ok, reason = False, str(e)[:200]
+
+        _claude_probe_cache[0] = ok
+        _claude_probe_cache[1] = reason
+        _claude_probe_cache[2] = _time.time()
+        return ok, reason
+
     async def handle_health(request: web.Request) -> web.Response:
         cfg = agent.config
         agent_name = cfg.identity_dir.name if cfg.identity_dir else "hollow"
@@ -47,11 +90,26 @@ def make_api_app(
             except Exception:
                 bots["discord"] = False
 
-        # If any configured bot failed to start, report degraded
-        if bots and not all(bots.values()):
-            return web.json_response({"status": "degraded", "agent": agent_name, "bots": bots})
+        # Probe the Claude API — degraded if unreachable
+        claude_ok, claude_reason = await _probe_claude_api()
 
-        payload: dict = {"status": "ok", "agent": agent_name}
+        degraded_reasons: list[str] = []
+        if bots and not all(bots.values()):
+            degraded_reasons.append("bot_disconnected")
+        if not claude_ok:
+            degraded_reasons.append(f"claude_api_unreachable: {claude_reason}")
+
+        if degraded_reasons:
+            payload: dict = {
+                "status": "degraded",
+                "agent": agent_name,
+                "reasons": degraded_reasons,
+            }
+            if bots:
+                payload["bots"] = bots
+            return web.json_response(payload)
+
+        payload = {"status": "ok", "agent": agent_name}
         if bots:
             payload["bots"] = bots
         return web.json_response(payload)
