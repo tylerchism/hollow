@@ -656,7 +656,23 @@ class DiscordBot:
                 and _routing_entry.get("port") == self.config.api_port
             )
 
-            should_respond = is_dm or is_tarn_channel or is_mentioned or is_reply_to_bot or is_owner or is_routed_channel
+            # Detect cross-agent channels: routing entry exists but points to a
+            # different agent's port. Owner messages in these channels must still
+            # go through the routing path (not be processed by Tarn directly).
+            # is_owner grants access to all of Tarn's own channels but must NOT
+            # suppress routing for channels owned by other agents.
+            _is_cross_agent_channel = (
+                _routing_entry is not None
+                and _routing_entry.get("port")
+                and _routing_entry.get("port") != self.config.api_port
+            )
+
+            # is_owner bypass applies only when the channel is NOT a cross-agent
+            # channel. For cross-agent channels, the routing block below handles
+            # the message (including owner messages) via the HTTP path.
+            is_owner_eligible = is_owner and not _is_cross_agent_channel
+
+            should_respond = is_dm or is_tarn_channel or is_mentioned or is_reply_to_bot or is_owner_eligible or is_routed_channel or _is_cross_agent_channel
             if not should_respond:
                 return
 
