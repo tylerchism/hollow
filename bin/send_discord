@@ -1,16 +1,22 @@
 #!/usr/bin/env bash
 # send_discord — Send an interim Discord message during a long-running task.
 #
-# Usage: send_discord "message text"
+# Usage: send_discord [-a <agent>] "message text"
+#        send_discord "message text"   (defaults to HOLLOW_AGENT env var, then "tarn")
 #
 # Reads DISCORD_BOT_TOKEN from agents/tarn/.env
-# Reads active channel_id from /tmp/tarn_active_discord_channel
+# Reads active channel_id from /tmp/hollow_active_discord_<agent>
 # (written by discord_channel.py on each inbound message)
+#
+# The agent name is resolved in this order:
+#   1. -a <agent> flag
+#   2. HOLLOW_AGENT environment variable
+#   3. Default: "tarn"
 #
 # If the active channel has a dedicated webhook route (e.g. #trader-bot → Flux),
 # the message is posted via webhook with the agent's display name instead of
-# the bot token. The webhook URL is written to /tmp/tarn_active_discord_webhook
-# and the display name to /tmp/tarn_active_discord_webhook_name.
+# the bot token. The webhook URL is written to /tmp/hollow_active_discord_webhook_<agent>
+# and the display name to /tmp/hollow_active_discord_webhook_name_<agent>.
 #
 # Call this BEFORE starting slow work so Tyler gets a heads-up:
 #   send_discord "on it, checking the repo..."
@@ -20,16 +26,32 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HOLLOW_ROOT="$(dirname "$SCRIPT_DIR")"
 TARN_ENV="$HOLLOW_ROOT/agents/tarn/.env"
-ACTIVE_CHANNEL_FILE="/tmp/tarn_active_discord_channel"
-ACTIVE_WEBHOOK_FILE="/tmp/tarn_active_discord_webhook"
-ACTIVE_WEBHOOK_NAME_FILE="/tmp/tarn_active_discord_webhook_name"
+
+AGENT_NAME="${HOLLOW_AGENT:-tarn}"
+
+# Parse optional -a <agent> flag
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -a|--agent)
+            AGENT_NAME="$2"
+            shift 2
+            ;;
+        *)
+            break
+            ;;
+    esac
+done
 
 if [[ $# -lt 1 ]]; then
-    echo "Usage: send_discord \"message text\"" >&2
+    echo "Usage: send_discord [-a <agent>] \"message text\"" >&2
     exit 1
 fi
 
 MESSAGE="$*"
+
+ACTIVE_CHANNEL_FILE="/tmp/hollow_active_discord_${AGENT_NAME}"
+ACTIVE_WEBHOOK_FILE="/tmp/hollow_active_discord_webhook_${AGENT_NAME}"
+ACTIVE_WEBHOOK_NAME_FILE="/tmp/hollow_active_discord_webhook_name_${AGENT_NAME}"
 
 # Read active channel_id
 if [[ ! -f "$ACTIVE_CHANNEL_FILE" ]]; then

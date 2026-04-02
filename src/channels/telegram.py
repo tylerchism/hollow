@@ -19,6 +19,7 @@ from telegram.ext import (
 )
 
 from src.agent import AgentRunner
+from src.channels.background_tasks import BackgroundTaskManager
 from src.config import Config
 
 log = logging.getLogger(__name__)
@@ -235,6 +236,7 @@ class TelegramBot:
         self.allowed_users: set[int] = set(config.telegram_allowed_users)
         self.app: Application | None = None
         self._queue = MessageQueue()
+        self._bg_tasks = BackgroundTaskManager()
         self._start_time: float = time.time()
         self._offset_store = UpdateOffsetStore(
             str(config.data_dir / "hollow.db")
@@ -386,6 +388,7 @@ class TelegramBot:
 
     async def stop(self) -> None:
         """Graceful shutdown."""
+        await self._bg_tasks.shutdown()
         await self._queue.shutdown()
         if self.app:
             await self.app.updater.stop()
@@ -553,9 +556,10 @@ class TelegramBot:
 
         try:
             import pathlib, tempfile, time
-            active_chat_file = pathlib.Path(tempfile.gettempdir()) / "tarn_active_chat_id"
+            _aname = self.config.identity_dir.name if self.config.identity_dir else "hollow"
+            active_chat_file = pathlib.Path(tempfile.gettempdir()) / f"hollow_active_chat_{_aname}"
             active_chat_file.write_text(chat_id)
-            ts_file = pathlib.Path(tempfile.gettempdir()) / "tarn_active_telegram_ts"
+            ts_file = pathlib.Path(tempfile.gettempdir()) / f"hollow_active_telegram_ts_{_aname}"
             ts_file.write_text(str(int(time.time())))
         except Exception:
             pass
@@ -576,24 +580,63 @@ class TelegramBot:
 
             keepalive_task = asyncio.create_task(typing_keepalive())
             try:
-                response = await asyncio.wait_for(
+                # Create the task without wait_for so it is never cancelled on
+                # timeout — we can hand it off to BackgroundTaskManager instead.
+                reply_task = asyncio.create_task(
                     self.agent.reply(
                         message=message_text,
                         chat_id=chat_id,
                         is_main_session=is_dm,
-                    ),
-                    timeout=300,
+                    )
                 )
-                if not response or not response.strip():
-                    response = "I ran out of investigation steps before finishing. Send me a message to continue where I left off."
-                if len(response) <= 4096:
-                    await update.message.reply_text(response)
+                finished, _ = await asyncio.wait({reply_task}, timeout=300)
+
+                if reply_task in finished:
+                    # Completed within the initial wait window — deliver normally.
+                    exc = reply_task.exception()
+                    if exc is not None:
+                        raise exc
+                    response = reply_task.result()
+                    if not response or not response.strip():
+                        response = "I ran out of investigation steps before finishing. Send me a message to continue where I left off."
+                    if len(response) <= 4096:
+                        await update.message.reply_text(response)
+                    else:
+                        for i in range(0, len(response), 4096):
+                            await update.message.reply_text(response[i : i + 4096])
                 else:
-                    for i in range(0, len(response), 4096):
-                        await update.message.reply_text(response[i : i + 4096])
-            except asyncio.TimeoutError:
-                log.warning("Telegram: agent.reply() timed out after 300s for chat %s", chat_id)
-                await update.message.reply_text("still working on this — taking longer than expected. I'll follow up when I have something.")
+                    # Timed out — keep the task alive and hand it to the manager.
+                    log.info(
+                        "Telegram: agent.reply() still running after 300s for chat %s — handing off to background",
+                        chat_id,
+                    )
+                    await update.message.reply_text(
+                        "Still on it — this is taking longer than usual. I'll follow up here when it's done."
+                    )
+
+                    # Capture message reference in closure for later delivery.
+                    _update = update
+                    _bot_self = self
+
+                    async def _deliver(result: str, _u=_update, _bs=_bot_self) -> None:
+                        if not result or not result.strip():
+                            result = "I ran out of investigation steps before finishing. Send me a message to continue where I left off."
+                        if len(result) <= 4096:
+                            await _u.message.reply_text(result)
+                        else:
+                            for i in range(0, len(result), 4096):
+                                await _u.message.reply_text(result[i : i + 4096])
+
+                    async def _on_error(exc: Exception, _u=_update) -> None:
+                        await _u.message.reply_text("Something went wrong with that task. Try again in a moment.")
+
+                    self._bg_tasks.register(
+                        task=reply_task,
+                        deliver_fn=_deliver,
+                        error_fn=_on_error,
+                        channel_type="telegram",
+                        channel_id=chat_id,
+                    )
             except Exception:
                 log.exception("Error processing media message from chat %s", chat_id)
                 await update.message.reply_text("Something went wrong. Try again in a moment.")

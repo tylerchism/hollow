@@ -189,9 +189,10 @@ def setup_scheduler(
         ):
             log.info("Cron job '%s' firing", _name)
             try:
-                tg_active_file = Path("/tmp/tarn_active_chat_id")
-                discord_channel_file = Path("/tmp/tarn_active_discord_channel")
-                discord_ts_file = Path("/tmp/tarn_active_discord_ts")
+                _aname = agent.config.identity_dir.name if agent.config.identity_dir else "hollow"
+                tg_active_file = Path(f"/tmp/hollow_active_chat_{_aname}")
+                discord_channel_file = Path(f"/tmp/hollow_active_discord_{_aname}")
+                discord_ts_file = Path(f"/tmp/hollow_active_discord_ts_{_aname}")
 
                 saved_tg_chat_id = None
                 saved_discord_channel = None
@@ -546,10 +547,14 @@ async def run(args: argparse.Namespace = None):
         scheduler.start()
         log.info("APScheduler started with %d job(s)", len(scheduler.get_jobs()))
 
-        # Send startup notification and proactively pick up where we left off
-        asyncio.create_task(
-            _send_startup_notification(config, agent, bot, discord_bot)
-        )
+        # Send startup notification and proactively pick up where we left off.
+        # Agents can set STARTUP_NOTIFICATION=false to suppress this (e.g. Flux,
+        # whose #trader-bot channel is a conversation channel, not a monitoring
+        # channel, and should not receive unsolicited restart announcements).
+        if config.startup_notification:
+            asyncio.create_task(
+                _send_startup_notification(config, agent, bot, discord_bot)
+            )
 
         print("Hollow is running. Press Ctrl+C to stop.")
         await stop_event.wait()
@@ -571,9 +576,11 @@ async def run(args: argparse.Namespace = None):
         await memory.close()
         # Clean up stale active-channel temp files so they don't mis-route
         # messages after a restart.
+        _aname = config.identity_dir.name if config.identity_dir else "hollow"
         for _tmp_file in (
-            Path("/tmp/tarn_active_chat_id"),
-            Path("/tmp/tarn_active_discord_channel"),
+            Path(f"/tmp/hollow_active_chat_{_aname}"),
+            Path(f"/tmp/hollow_active_discord_{_aname}"),
+            Path(f"/tmp/hollow_active_discord_ts_{_aname}"),
         ):
             try:
                 _tmp_file.unlink(missing_ok=True)

@@ -218,6 +218,7 @@ def try_restart(name: str, port: int, token: Optional[str] = None, chat_id: int 
 
     identity_dir = HOLLOW_ROOT / "agents" / name
     memory_dir   = HOLLOW_ROOT / "agent-memory" / name
+    data_dir     = HOLLOW_ROOT / "data" / name
 
     if not identity_dir.exists() or not memory_dir.exists():
         log(f"  restart: agent dirs not found for {name}, skipping")
@@ -240,6 +241,7 @@ def try_restart(name: str, port: int, token: Optional[str] = None, chat_id: int 
         "--port", str(port),
         "--identity-dir", str(identity_dir),
         "--memory-dir", str(memory_dir),
+        "--data-dir", str(data_dir),
     ]
 
     try:

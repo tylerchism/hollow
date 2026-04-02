@@ -13,7 +13,7 @@ The bot responds to:
   - DMs to the bot
   - Messages that @mention the bot in other channels
 
-Interim messaging: active channel ID is written to /tmp/tarn_active_discord_channel
+Interim messaging: active channel ID is written to /tmp/hollow_active_discord_<agent>
 so that bin/send_discord and bin/send_msg can fire mid-turn messages.
 """
 
@@ -40,19 +40,11 @@ log = logging.getLogger(__name__)
 # Channel name the bot treats as "always respond here" (case-insensitive)
 TARN_CHANNEL_NAME = "tarn"
 
-# File written so send_discord can detect that the active channel is trader-bot
-# and should use the webhook (posting as "Flux") instead of the bot API.
-ACTIVE_WEBHOOK_FILE = pathlib.Path(tempfile.gettempdir()) / "tarn_active_discord_webhook"
-ACTIVE_WEBHOOK_NAME_FILE = pathlib.Path(tempfile.gettempdir()) / "tarn_active_discord_webhook_name"
-
 # Discord message character limit
 DISCORD_MSG_LIMIT = 2000
 
 # TTL for the seen-message dedup set (seconds)
 DEDUP_TTL_SECS = 300
-
-# File written so bin/send_discord and bin/send_msg can send interim messages
-ACTIVE_CHANNEL_FILE = pathlib.Path(tempfile.gettempdir()) / "tarn_active_discord_channel"
 
 
 def _split_for_discord(text: str, limit: int = DISCORD_MSG_LIMIT) -> list[str]:
@@ -238,6 +230,15 @@ class DiscordBot:
         self._dedup_cache: dict[int, float] = {}
         self._bg_tasks = BackgroundTaskManager()
 
+        # Agent name — used to namespace /tmp files so concurrent bots don't
+        # clobber each other's active-channel state.
+        _agent_name = config.identity_dir.name if config.identity_dir else "hollow"
+        _tmp = pathlib.Path(tempfile.gettempdir())
+        self._active_channel_file     = _tmp / f"hollow_active_discord_{_agent_name}"
+        self._active_discord_ts_file  = _tmp / f"hollow_active_discord_ts_{_agent_name}"
+        self._active_webhook_file     = _tmp / f"hollow_active_discord_webhook_{_agent_name}"
+        self._active_webhook_name_file = _tmp / f"hollow_active_discord_webhook_name_{_agent_name}"
+
         # Channel routing: maps discord_channel names → agent config
         # Loaded once at startup from hollow.config.json.
         self._channel_routing: dict[str, dict] = _load_channel_routing()
@@ -292,9 +293,8 @@ class DiscordBot:
     def _write_active_channel(self, channel_id: str, channel_name: str = "") -> None:
         try:
             import time
-            ACTIVE_CHANNEL_FILE.write_text(channel_id)
-            ts_file = pathlib.Path(tempfile.gettempdir()) / "tarn_active_discord_ts"
-            ts_file.write_text(str(int(time.time())))
+            self._active_channel_file.write_text(channel_id)
+            self._active_discord_ts_file.write_text(str(int(time.time())))
 
             # If this channel has a dedicated webhook route, write the webhook
             # URL and display name so send_discord / send_msg can post as the
@@ -302,14 +302,14 @@ class DiscordBot:
             channel_name_lower = channel_name.lower()
             routing = self._channel_routing.get(channel_name_lower)
             if routing and routing.get("webhook_url"):
-                ACTIVE_WEBHOOK_FILE.write_text(routing["webhook_url"])
-                ACTIVE_WEBHOOK_NAME_FILE.write_text(routing["display_name"])
+                self._active_webhook_file.write_text(routing["webhook_url"])
+                self._active_webhook_name_file.write_text(routing["display_name"])
             else:
                 # Clear any stale webhook files when the active channel changes
                 # to a non-routed channel.
                 try:
-                    ACTIVE_WEBHOOK_FILE.unlink(missing_ok=True)
-                    ACTIVE_WEBHOOK_NAME_FILE.unlink(missing_ok=True)
+                    self._active_webhook_file.unlink(missing_ok=True)
+                    self._active_webhook_name_file.unlink(missing_ok=True)
                 except Exception:
                     pass
         except Exception:
@@ -645,10 +645,16 @@ class DiscordBot:
             # message author, respond regardless of channel.
             is_owner = self._owner_id is not None and user_id == self._owner_id
 
-            # Routed channels: channels mapped to specialist agents in hollow.config.json
-            # (e.g. #trader-bot → Flux). Always respond in these channels.
+            # Routed channels: only respond if the routing entry points to THIS
+            # agent (self-route by port). Cross-agent routes belong to the
+            # owning bot and should be ignored here — otherwise two bots both
+            # process the same message.
             _pre_channel_name = getattr(message.channel, "name", "").lower()
-            is_routed_channel = _pre_channel_name in self._channel_routing
+            _routing_entry = self._channel_routing.get(_pre_channel_name)
+            is_routed_channel = (
+                _routing_entry is not None
+                and _routing_entry.get("port") == self.config.api_port
+            )
 
             should_respond = is_dm or is_tarn_channel or is_mentioned or is_reply_to_bot or is_owner or is_routed_channel
             if not should_respond:
@@ -846,7 +852,12 @@ class DiscordBot:
         if self._client:
             await self._client.close()
         # Clean up active channel and webhook temp files
-        for _f in (ACTIVE_CHANNEL_FILE, ACTIVE_WEBHOOK_FILE, ACTIVE_WEBHOOK_NAME_FILE):
+        for _f in (
+            self._active_channel_file,
+            self._active_discord_ts_file,
+            self._active_webhook_file,
+            self._active_webhook_name_file,
+        ):
             try:
                 _f.unlink(missing_ok=True)
             except Exception:

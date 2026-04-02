@@ -1,12 +1,18 @@
 #!/usr/bin/env bash
 # send_msg — Send an interim message on whichever channel is currently active.
 #
-# Usage: send_msg "message text"
+# Usage: send_msg [-a <agent>] "message text"
+#        send_msg "message text"   (defaults to HOLLOW_AGENT env var, then "tarn")
 #
-# Checks both /tmp/tarn_active_discord_channel (Discord) and
-# /tmp/tarn_active_chat_id (Telegram) and sends to whichever received the
+# Checks both /tmp/hollow_active_discord_<agent> (Discord) and
+# /tmp/hollow_active_chat_<agent> (Telegram) and sends to whichever received the
 # most recent inbound message. If only one is set, uses that one.
 # If neither is set, exits with error.
+#
+# The agent name is resolved in this order:
+#   1. -a <agent> flag
+#   2. HOLLOW_AGENT environment variable
+#   3. Default: "tarn"
 #
 # This is the unified interim-messaging script for soul.md.
 # Individual channel scripts (send_tg, send_discord) still work directly.
@@ -15,17 +21,32 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-DISCORD_ACTIVE_FILE="/tmp/tarn_active_discord_channel"
-TELEGRAM_ACTIVE_FILE="/tmp/tarn_active_chat_id"
-DISCORD_TS_FILE="/tmp/tarn_active_discord_ts"
-TELEGRAM_TS_FILE="/tmp/tarn_active_telegram_ts"
+AGENT_NAME="${HOLLOW_AGENT:-tarn}"
+
+# Parse optional -a <agent> flag
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -a|--agent)
+            AGENT_NAME="$2"
+            shift 2
+            ;;
+        *)
+            break
+            ;;
+    esac
+done
 
 if [[ $# -lt 1 ]]; then
-    echo "Usage: send_msg \"message text\"" >&2
+    echo "Usage: send_msg [-a <agent>] \"message text\"" >&2
     exit 1
 fi
 
 MESSAGE="$*"
+
+DISCORD_ACTIVE_FILE="/tmp/hollow_active_discord_${AGENT_NAME}"
+TELEGRAM_ACTIVE_FILE="/tmp/hollow_active_chat_${AGENT_NAME}"
+DISCORD_TS_FILE="/tmp/hollow_active_discord_ts_${AGENT_NAME}"
+TELEGRAM_TS_FILE="/tmp/hollow_active_telegram_ts_${AGENT_NAME}"
 
 DISCORD_CHANNEL=""
 TELEGRAM_CHAT=""
@@ -58,12 +79,12 @@ fi
 # Use whichever channel received a message most recently
 if [[ -n "$DISCORD_CHANNEL" && -n "$TELEGRAM_CHAT" ]]; then
     if [[ "$DISCORD_TS" -ge "$TELEGRAM_TS" ]]; then
-        "$SCRIPT_DIR/send_discord" "$MESSAGE"
+        "$SCRIPT_DIR/send_discord" -a "$AGENT_NAME" "$MESSAGE"
     else
         "$SCRIPT_DIR/send_tg" "$MESSAGE"
     fi
 elif [[ -n "$DISCORD_CHANNEL" ]]; then
-    "$SCRIPT_DIR/send_discord" "$MESSAGE"
+    "$SCRIPT_DIR/send_discord" -a "$AGENT_NAME" "$MESSAGE"
 else
     "$SCRIPT_DIR/send_tg" "$MESSAGE"
 fi
