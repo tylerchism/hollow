@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # Restart the Tarn agent process.
+# Thin wrapper around bin/restart-agent — delegates all kill/wait/launch logic
+# there so every agent gets the same restart safety guarantees.
+#
 # Safe to call from within the running Tarn process — this bash script is its
 # own OS process and survives independently even if its Python parent is killed.
-#
-# Order: kill old first (free the port), then start new.
 
 set -euo pipefail
 
@@ -11,83 +12,9 @@ TARN_PORT=18800
 TARN_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 LOG_FILE="/tmp/tarn.log"
 
-echo "[restart-tarn] Killing ALL old Tarn processes..."
-
-# Kill by port (process holding the socket)
-OLD_PIDS=$(lsof -ti:"$TARN_PORT" 2>/dev/null || true)
-# Also kill any stale Tarn python processes by identity-dir pattern (handles processes
-# that were started but haven't bound to the port yet — the root cause of pile-up)
-PATTERN_PIDS=$(pgrep -f "identity-dir.*agents/tarn" 2>/dev/null || true)
-
-ALL_PIDS=$(echo "$OLD_PIDS $PATTERN_PIDS" | tr ' ' '\n' | sort -u | tr '\n' ' ')
-
-if [ -n "$(echo $ALL_PIDS | tr -d ' ')" ]; then
-  for pid in $ALL_PIDS; do
-    echo "[restart-tarn] Sending SIGTERM to pid=$pid"
-    kill "$pid" 2>/dev/null || true
-  done
-else
-  echo "[restart-tarn] No old Tarn processes found."
-fi
-
-echo "[restart-tarn] Waiting up to 5s for port $TARN_PORT to free after SIGTERM..."
-PORT_FREE=0
-for i in $(seq 1 5); do
-  if ! lsof -ti:"$TARN_PORT" >/dev/null 2>&1; then
-    echo "[restart-tarn] Port $TARN_PORT is free."
-    PORT_FREE=1
-    break
-  fi
-  echo "[restart-tarn] Port still in use, waiting... (${i}/5)"
-  sleep 1
-done
-
-if [ "$PORT_FREE" -eq 0 ]; then
-  echo "[restart-tarn] Port still held after 5s — escalating to SIGKILL..."
-  REMAINING_PIDS=$(echo "$ALL_PIDS" | tr ' ' '\n' | tr '\n' ' ')
-  for pid in $REMAINING_PIDS; do
-    if kill -0 "$pid" 2>/dev/null; then
-      echo "[restart-tarn] Sending SIGKILL to pid=$pid"
-      kill -9 "$pid" 2>/dev/null || true
-    fi
-  done
-
-  echo "[restart-tarn] Waiting up to 5s for port $TARN_PORT to free after SIGKILL..."
-  for i in $(seq 1 5); do
-    if ! lsof -ti:"$TARN_PORT" >/dev/null 2>&1; then
-      echo "[restart-tarn] Port $TARN_PORT is free."
-      PORT_FREE=1
-      break
-    fi
-    echo "[restart-tarn] Port still in use, waiting... (${i}/5)"
-    sleep 1
-  done
-fi
-
-if [ "$PORT_FREE" -eq 0 ]; then
-  echo "[restart-tarn] ERROR: Port $TARN_PORT still in use after SIGKILL escalation. Aborting restart."
-  exit 1
-fi
-
-# Extra buffer: lsof reports the port free before the OS fully releases the
-# socket (TIME_WAIT state). Give aiohttp 2 extra seconds to fully relinquish
-# the socket so the new process can bind on the first attempt.
-echo "[restart-tarn] Waiting 2s for socket TIME_WAIT to fully clear..."
-sleep 2
-
-echo "[restart-tarn] Starting new Tarn process..."
-
-# Start the new process fully detached so it survives this script exiting.
-# setsid creates a new session; nohup keeps it alive after the parent dies.
-cd "$TARN_DIR"
-setsid nohup /home/tchism/.local/bin/uv run python -m src.main \
+exec "$TARN_DIR/bin/restart-agent" tarn "$TARN_PORT" "$LOG_FILE" \
+  /home/tchism/.local/bin/uv run python -m src.main \
   --port "$TARN_PORT" \
   --identity-dir "$TARN_DIR/agents/tarn" \
   --memory-dir "$TARN_DIR/agent-memory/tarn" \
-  --data-dir "$TARN_DIR/data/tarn" \
-  >> "$LOG_FILE" 2>&1 &
-
-NEW_PID=$!
-disown "$NEW_PID" 2>/dev/null || true
-echo "[restart-tarn] New Tarn started (pid=$NEW_PID), log=$LOG_FILE"
-echo "[restart-tarn] Done."
+  --data-dir "$TARN_DIR/data/tarn"

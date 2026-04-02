@@ -1,0 +1,109 @@
+#!/usr/bin/env bash
+# restart-agent — generic agent restart script.
+#
+# Usage: restart-agent NAME PORT LOG_FILE LAUNCH_CMD...
+#
+#   NAME        Agent name (for logging and pgrep pattern).
+#   PORT        Port the agent binds on.
+#   LOG_FILE    Absolute path to the agent's log file.
+#   LAUNCH_CMD  Full launch command and arguments (remaining args).
+#
+# Mirrors the same SIGTERM → wait → SIGKILL → TIME_WAIT pattern as the
+# old restart-tarn script so all agents get equivalent restart safety.
+#
+# Safe to call from within the running agent process — this bash script is
+# its own OS process and survives independently even if its Python parent
+# is killed.
+
+set -euo pipefail
+
+NAME="${1:?restart-agent: NAME is required}"
+PORT="${2:?restart-agent: PORT is required}"
+LOG_FILE="${3:?restart-agent: LOG_FILE is required}"
+shift 3
+LAUNCH_CMD=("$@")
+
+if [ ${#LAUNCH_CMD[@]} -eq 0 ]; then
+  echo "[restart-agent:$NAME] ERROR: LAUNCH_CMD is empty. Nothing to start." >&2
+  exit 1
+fi
+
+HOLLOW_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+
+echo "[restart-agent:$NAME] Killing all old $NAME processes..."
+
+# Kill by port (process holding the socket)
+OLD_PIDS=$(lsof -ti:"$PORT" 2>/dev/null || true)
+# Kill any stale processes by identity-dir pattern — catches processes that
+# started but haven't bound to the port yet (root cause of pile-up restarts)
+PATTERN_PIDS=$(pgrep -f "identity-dir.*agents/$NAME" 2>/dev/null || true)
+
+ALL_PIDS=$(echo "$OLD_PIDS $PATTERN_PIDS" | tr ' ' '\n' | sort -u | grep -v '^$' | tr '\n' ' ')
+
+if [ -n "$(echo "$ALL_PIDS" | tr -d ' ')" ]; then
+  for pid in $ALL_PIDS; do
+    echo "[restart-agent:$NAME] Sending SIGTERM to pid=$pid"
+    kill "$pid" 2>/dev/null || true
+  done
+else
+  echo "[restart-agent:$NAME] No old $NAME processes found."
+fi
+
+echo "[restart-agent:$NAME] Waiting up to 5s for port $PORT to free after SIGTERM..."
+PORT_FREE=0
+for i in $(seq 1 5); do
+  if ! lsof -ti:"$PORT" >/dev/null 2>&1; then
+    echo "[restart-agent:$NAME] Port $PORT is free."
+    PORT_FREE=1
+    break
+  fi
+  echo "[restart-agent:$NAME] Port still in use, waiting... (${i}/5)"
+  sleep 1
+done
+
+if [ "$PORT_FREE" -eq 0 ]; then
+  echo "[restart-agent:$NAME] Port still held after 5s — escalating to SIGKILL..."
+  for pid in $ALL_PIDS; do
+    if kill -0 "$pid" 2>/dev/null; then
+      echo "[restart-agent:$NAME] Sending SIGKILL to pid=$pid"
+      kill -9 "$pid" 2>/dev/null || true
+    fi
+  done
+
+  echo "[restart-agent:$NAME] Waiting up to 5s for port $PORT to free after SIGKILL..."
+  for i in $(seq 1 5); do
+    if ! lsof -ti:"$PORT" >/dev/null 2>&1; then
+      echo "[restart-agent:$NAME] Port $PORT is free."
+      PORT_FREE=1
+      break
+    fi
+    echo "[restart-agent:$NAME] Port still in use, waiting... (${i}/5)"
+    sleep 1
+  done
+fi
+
+if [ "$PORT_FREE" -eq 0 ]; then
+  echo "[restart-agent:$NAME] ERROR: Port $PORT still in use after SIGKILL escalation. Aborting restart." >&2
+  exit 1
+fi
+
+# Extra buffer: lsof reports the port free before the OS fully releases the
+# socket (TIME_WAIT state). Give the new process 2 extra seconds so it can
+# bind on the first attempt.
+echo "[restart-agent:$NAME] Waiting 2s for socket TIME_WAIT to fully clear..."
+sleep 2
+
+echo "[restart-agent:$NAME] Starting new $NAME process..."
+
+# Ensure log file directory exists
+mkdir -p "$(dirname "$LOG_FILE")"
+
+# Start the new process fully detached so it survives this script exiting.
+# setsid creates a new session; nohup keeps it alive after the parent dies.
+cd "$HOLLOW_ROOT"
+setsid nohup "${LAUNCH_CMD[@]}" >> "$LOG_FILE" 2>&1 &
+
+NEW_PID=$!
+disown "$NEW_PID" 2>/dev/null || true
+echo "[restart-agent:$NAME] New $NAME started (pid=$NEW_PID), log=$LOG_FILE"
+echo "[restart-agent:$NAME] Done."
