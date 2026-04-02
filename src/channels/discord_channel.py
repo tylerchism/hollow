@@ -189,7 +189,7 @@ async def _post_to_agent(port: int, message: str, chat_id: str) -> str | None:
     def _do_request():
         req = urllib.request.Request(url, data=payload, method="POST")
         req.add_header("Content-Type", "application/json")
-        with urllib.request.urlopen(req, timeout=300) as resp:
+        with urllib.request.urlopen(req, timeout=900) as resp:
             data = json.loads(resp.read().decode())
             return data.get("response", "")
 
@@ -453,8 +453,17 @@ class DiscordBot:
         message_text: str,
         is_main_session: bool,
         channel_name: str = "",
+        webhook_url: str = "",
+        webhook_display_name: str = "",
     ) -> None:
-        """Shared processing pipeline for all message types (mirrors telegram.py)."""
+        """Shared processing pipeline for all message types (mirrors telegram.py).
+
+        When *webhook_url* is provided responses are delivered via that webhook
+        (posting as *webhook_display_name*) instead of via the Discord bot API.
+        This is used for self-routed channels (e.g. Flux's #trader-bot) so the
+        full 900s wait + BackgroundTaskManager flow is available while still
+        posting replies as the branded webhook user.
+        """
         msg_id = message.id
 
         if self._is_duplicate(msg_id):
@@ -463,6 +472,21 @@ class DiscordBot:
 
         # Write active channel for bin/send_discord and bin/send_msg
         self._write_active_channel(channel_id, channel_name=channel_name)
+
+        async def _send_reply(text: str) -> None:
+            """Deliver *text* — via webhook if configured, otherwise direct."""
+            if webhook_url:
+                await _send_webhook(
+                    webhook_url=webhook_url,
+                    text=text,
+                    username=webhook_display_name,
+                )
+            else:
+                await self._send_chunked(message.channel, text)
+
+        async def _send_status(text: str) -> None:
+            """Send a short status notice always via the bot API (not webhook)."""
+            await message.channel.send(text)
 
         async def process():
             # Show typing indicator while the agent works
@@ -502,9 +526,9 @@ class DiscordBot:
                     if not response or not response.strip():
                         if not self._shutting_down:
                             fallback = "I ran out of investigation steps before finishing. Send me a message to continue where I left off."
-                            await self._send_chunked(message.channel, fallback)
+                            await _send_reply(fallback)
                     else:
-                        await self._send_chunked(message.channel, response)
+                        await _send_reply(response)
                 else:
                     # Timed out — keep the task alive and hand it to the manager.
                     log.info(
@@ -512,25 +536,23 @@ class DiscordBot:
                         channel_id,
                     )
                     if not self._shutting_down:
-                        await message.channel.send(
+                        await _send_status(
                             "Still on it — this is taking longer than usual. I'll post the result here when it's done."
                         )
 
-                    # Capture channel reference in closure for later delivery.
-                    _channel = message.channel
                     _shutting_down_ref = self  # to check self._shutting_down at delivery time
 
-                    async def _deliver(result: str, _ch=_channel, _sd=_shutting_down_ref) -> None:
+                    async def _deliver(result: str, _sd=_shutting_down_ref) -> None:
                         if _sd._shutting_down:
                             return
                         if not result or not result.strip():
                             result = "I ran out of investigation steps before finishing. Send me a message to continue where I left off."
-                        await _sd._send_chunked(_ch, result)
+                        await _send_reply(result)
 
-                    async def _on_error(exc: Exception, _ch=_channel, _sd=_shutting_down_ref) -> None:
+                    async def _on_error(exc: Exception, _sd=_shutting_down_ref) -> None:
                         if _sd._shutting_down:
                             return
-                        await _ch.send("Something went wrong with that task. Try again in a moment.")
+                        await _send_status("Something went wrong with that task. Try again in a moment.")
 
                     self._bg_tasks.register(
                         task=reply_task,
@@ -542,7 +564,7 @@ class DiscordBot:
             except Exception:
                 log.exception("Discord: error processing message in channel %s", channel_id)
                 if not self._shutting_down:
-                    await message.channel.send("Something went wrong. Try again in a moment.")
+                    await _send_status("Something went wrong. Try again in a moment.")
             finally:
                 done.set()
                 keepalive_task.cancel()
@@ -685,8 +707,8 @@ class DiscordBot:
                 return
 
             # Channel routing: if this channel is mapped to a specialist agent,
-            # POST to that agent's /ask endpoint and reply via webhook instead of
-            # routing through Tarn.
+            # either call agent.reply() directly (self-route) or POST to the
+            # remote agent's /ask endpoint, then deliver via webhook.
             routing = self._channel_routing.get(channel_name)
             if routing and routing.get("port") and routing.get("webhook_url"):
                 log.info(
@@ -695,6 +717,31 @@ class DiscordBot:
                     routing["name"],
                     routing["port"],
                 )
+
+                # Self-route: the routing config points at this agent's own port.
+                # Skip the HTTP hop entirely and go through _process_and_reply()
+                # so we get the full 900s asyncio.wait + BackgroundTaskManager
+                # flow with proper typing keepalive and webhook delivery.
+                if routing["port"] == self.config.api_port:
+                    log.info(
+                        "Discord: self-route detected for #%s — calling agent.reply() directly",
+                        channel_name,
+                    )
+                    await self._process_and_reply(
+                        message=message,
+                        channel_id=channel_id,
+                        user_id=user_id,
+                        message_text=content,
+                        is_main_session=True,
+                        channel_name=channel_name,
+                        webhook_url=routing["webhook_url"],
+                        webhook_display_name=routing["display_name"],
+                    )
+                    return
+
+                # Cross-agent route: POST to the remote agent's /ask endpoint.
+                # Use a 900s timeout to match the BackgroundTaskManager window
+                # on the remote side; the remote agent handles its own delivery.
                 self._write_active_channel(channel_id, channel_name=channel_name)
                 self._mark_seen(message.id)
 
