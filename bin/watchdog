@@ -174,69 +174,47 @@ def check_bot_health(name: str, port: int, token: Optional[str], chat_id: int) -
 
 def try_restart(name: str, port: int, token: Optional[str] = None, chat_id: int = TYLER_CHAT_ID) -> bool:
     """
-    Attempt to restart a dead agent by re-running start.sh for that agent only.
-    This is best-effort — if start.sh doesn't support single-agent mode yet, it logs and skips.
+    Restart a dead agent using bin/restart-agent.
+
+    All agents (including tarn) use the same restart-agent script which handles
+    the full SIGTERM → wait → SIGKILL → TIME_WAIT → launch sequence.  This
+    eliminates the subprocess.Popen race condition where a hung process holding
+    the port causes the new process to fail binding silently.
     """
-    start_sh = HOLLOW_ROOT / "start.sh"
-    if not start_sh.exists():
-        log(f"  restart: start.sh not found, skipping")
+    restart_agent = HOLLOW_ROOT / "bin" / "restart-agent"
+    if not restart_agent.exists():
+        log(f"  restart: bin/restart-agent not found, skipping")
         return False
 
     log_path = LOG_DIR / f"{name}.log"
     log(f"  restart: attempting to relaunch {name} (port {port})...")
 
-    # Special case: tarn uses restart-tarn script
-    if name == "tarn":
-        restart_script = HOLLOW_ROOT / "bin" / "restart-tarn"
-        try:
-            subprocess.run(
-                ["bash", str(restart_script)],
-                cwd=str(HOLLOW_ROOT),
-                check=False,
-            )
-        except Exception as e:
-            log(f"  restart: restart-tarn failed: {e}")
-            return False
-        # restart-tarn waits 2s internally; allow 15s total for bots to connect
-        time.sleep(15)
-        healthy, detail, _ = ping_agent(name, port)
-        if healthy:
-            log(f"  restart: {name} is back up (via restart-tarn)")
-            check_bot_health(name, port, token, chat_id)
-            return True
-        else:
-            log(f"  restart: {name} still down after restart-tarn — {detail}")
-            return False
-
-    # Read config for this specific agent to build the launch command
-    cfg = load_config()
-    all_agents = [cfg["coordinator"]] + cfg.get("agents", [])
-    agent_cfg = next((a for a in all_agents if a["name"] == name), None)
-    if not agent_cfg:
-        log(f"  restart: {name} not found in config, skipping")
-        return False
-
-    identity_dir = HOLLOW_ROOT / "agents" / name
-    memory_dir   = HOLLOW_ROOT / "agent-memory" / name
-    data_dir     = HOLLOW_ROOT / "data" / name
-
-    if not identity_dir.exists() or not memory_dir.exists():
-        log(f"  restart: agent dirs not found for {name}, skipping")
-        return False
-
-    env = os.environ.copy()
-    env_file = identity_dir / ".env"
-    if env_file.exists():
-        for k, v in load_env(env_file).items():
-            env[k] = v
-
-    model = agent_cfg.get("model", env.get("PRIMARY_MODEL", "claude-sonnet-4-6"))
-    env["PRIMARY_MODEL"] = model
-
-    # Use absolute path to uv — system cron has a stripped PATH and won't find
-    # uv via PATH lookup. /home/tchism/.local/bin/uv is the installed location.
+    # Build the launch command for this agent.
+    # Tarn has fixed well-known dirs; all others derive dirs from convention.
     UV_BIN = "/home/tchism/.local/bin/uv"
-    cmd = [
+
+    if name == "tarn":
+        identity_dir = HOLLOW_ROOT / "agents" / "tarn"
+        memory_dir   = HOLLOW_ROOT / "agent-memory" / "tarn"
+        data_dir     = HOLLOW_ROOT / "data" / "tarn"
+    else:
+        # Read config to verify the agent exists and to get its model setting
+        cfg = load_config()
+        all_agents = [cfg["coordinator"]] + cfg.get("agents", [])
+        agent_cfg = next((a for a in all_agents if a["name"] == name), None)
+        if not agent_cfg:
+            log(f"  restart: {name} not found in config, skipping")
+            return False
+
+        identity_dir = HOLLOW_ROOT / "agents" / name
+        memory_dir   = HOLLOW_ROOT / "agent-memory" / name
+        data_dir     = HOLLOW_ROOT / "data" / name
+
+        if not identity_dir.exists() or not memory_dir.exists():
+            log(f"  restart: agent dirs not found for {name}, skipping")
+            return False
+
+    launch_cmd = [
         UV_BIN, "run", "python", "-m", "src.main",
         "--port", str(port),
         "--identity-dir", str(identity_dir),
@@ -245,30 +223,25 @@ def try_restart(name: str, port: int, token: Optional[str] = None, chat_id: int 
     ]
 
     try:
-        with open(log_path, "a") as logf:
-            proc = subprocess.Popen(
-                cmd,
-                stdout=logf,
-                stderr=logf,
-                cwd=str(HOLLOW_ROOT),
-                env=env,
-                preexec_fn=os.setsid,
-            )
-        # Give it 3 seconds then verify it's alive
-        time.sleep(3)
-        healthy, detail, _ = ping_agent(name, port)
-        if healthy:
-            log(f"  restart: {name} is back up (pid {proc.pid})")
-            # Append new PID to .hollow.pids
-            with open(PID_FILE, "a") as f:
-                f.write(f"{proc.pid}\n")
-            check_bot_health(name, port, token, chat_id)
-            return True
-        else:
-            log(f"  restart: {name} still down after relaunch — {detail}")
-            return False
+        subprocess.run(
+            ["bash", str(restart_agent), name, str(port), str(log_path)] + launch_cmd,
+            cwd=str(HOLLOW_ROOT),
+            check=False,
+        )
     except Exception as e:
-        log(f"  restart: failed to launch {name}: {e}")
+        log(f"  restart: restart-agent failed for {name}: {e}")
+        return False
+
+    # restart-agent waits 2s internally for TIME_WAIT; allow 15s total for bots
+    # to connect before declaring the restart successful.
+    time.sleep(15)
+    healthy, detail, _ = ping_agent(name, port)
+    if healthy:
+        log(f"  restart: {name} is back up (via restart-agent)")
+        check_bot_health(name, port, token, chat_id)
+        return True
+    else:
+        log(f"  restart: {name} still down after restart-agent — {detail}")
         return False
 
 
