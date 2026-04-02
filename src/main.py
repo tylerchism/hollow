@@ -380,6 +380,13 @@ async def _send_startup_notification(config, agent, bot, discord_bot) -> None:
                 await bot.send_message(config.heartbeat_chat_id, response)
         except asyncio.TimeoutError:
             log.warning("Telegram startup context review timed out after 120s")
+            try:
+                await bot.send_message(
+                    config.heartbeat_chat_id,
+                    "I'm back — ready to continue. What are we working on?",
+                )
+            except Exception:
+                pass
         except Exception:
             log.exception("Failed to run Telegram startup context review")
             try:
@@ -429,6 +436,13 @@ async def _send_startup_notification(config, agent, bot, discord_bot) -> None:
                     await discord_bot._send_chunked(tarn_channel, response)
             except asyncio.TimeoutError:
                 log.warning("Discord startup context review timed out after 120s for channel %s", discord_chat_id)
+                try:
+                    await discord_bot._send_chunked(
+                        tarn_channel,
+                        "I'm back — ready to continue. What are we working on?",
+                    )
+                except Exception:
+                    pass
             except Exception:
                 log.exception("Failed to run Discord startup context review for channel %s", discord_chat_id)
                 try:
