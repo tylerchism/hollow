@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
 # restart-agent — generic agent restart script.
 #
-# Usage: restart-agent NAME PORT LOG_FILE LAUNCH_CMD...
+# Usage: restart-agent NAME PORT LAUNCH_CMD...
 #
 #   NAME        Agent name (for logging and pgrep pattern).
+#               Log file is derived as /tmp/<NAME>.log.
 #   PORT        Port the agent binds on.
-#   LOG_FILE    Absolute path to the agent's log file.
 #   LAUNCH_CMD  Full launch command and arguments (remaining args).
 #
-# Mirrors the same SIGTERM → wait → SIGKILL → TIME_WAIT pattern as the
-# old restart-tarn script so all agents get equivalent restart safety.
+# Mirrors the same SIGTERM → wait → SIGKILL → TIME_WAIT pattern so all
+# agents get equivalent restart safety guarantees.
 #
 # Safe to call from within the running agent process — this bash script is
 # its own OS process and survives independently even if its Python parent
@@ -19,8 +19,7 @@ set -euo pipefail
 
 NAME="${1:?restart-agent: NAME is required}"
 PORT="${2:?restart-agent: PORT is required}"
-LOG_FILE="${3:?restart-agent: LOG_FILE is required}"
-shift 3
+shift 2
 LAUNCH_CMD=("$@")
 
 if [ ${#LAUNCH_CMD[@]} -eq 0 ]; then
@@ -28,6 +27,7 @@ if [ ${#LAUNCH_CMD[@]} -eq 0 ]; then
   exit 1
 fi
 
+LOG_FILE="/tmp/${NAME}.log"
 HOLLOW_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
 echo "[restart-agent:$NAME] Killing all old $NAME processes..."

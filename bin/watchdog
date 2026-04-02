@@ -186,7 +186,6 @@ def try_restart(name: str, port: int, token: Optional[str] = None, chat_id: int 
         log(f"  restart: bin/restart-agent not found, skipping")
         return False
 
-    log_path = LOG_DIR / f"{name}.log"
     log(f"  restart: attempting to relaunch {name} (port {port})...")
 
     # Build the launch command for this agent.
@@ -223,8 +222,10 @@ def try_restart(name: str, port: int, token: Optional[str] = None, chat_id: int 
     ]
 
     try:
+        # bin/restart-agent signature: NAME PORT LAUNCH_CMD...
+        # Log file is derived internally as /tmp/<NAME>.log.
         subprocess.run(
-            ["bash", str(restart_agent), name, str(port), str(log_path)] + launch_cmd,
+            ["bash", str(restart_agent), name, str(port)] + launch_cmd,
             cwd=str(HOLLOW_ROOT),
             check=False,
         )

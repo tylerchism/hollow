@@ -10,9 +10,8 @@ set -euo pipefail
 
 TARN_PORT=18800
 TARN_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-LOG_FILE="/tmp/tarn.log"
 
-exec "$TARN_DIR/bin/restart-agent" tarn "$TARN_PORT" "$LOG_FILE" \
+exec "$TARN_DIR/bin/restart-agent" tarn "$TARN_PORT" \
   /home/tchism/.local/bin/uv run python -m src.main \
   --port "$TARN_PORT" \
   --identity-dir "$TARN_DIR/agents/tarn" \
