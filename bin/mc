@@ -16,7 +16,7 @@ def api(method, path, data=None, params=None):
     url = f"{BASE_URL}{path}"
     if params:
         url += "?" + urllib.parse.urlencode(params)
-    body = json.dumps(data).encode() if data else None
+    body = json.dumps(data).encode() if data is not None else None
     req = urllib.request.Request(url, data=body, method=method)
     req.add_header("Content-Type", "application/json")
     req.add_header("x-api-key", API_KEY)
@@ -51,8 +51,8 @@ def main():
     if len(sys.argv) < 3:
         print("Usage: mc <resource> <operation> [args]")
         print("  mc tasks list [--status=<status>]")
-        print("  mc tasks create \"<title>\" [--description=\"...\"] [--priority=high|medium|low] [--tags=\"t1,t2\"]")
-        print("  mc tasks update <id> --status=<status> [--blocked-reason=\"...\"]")
+        print("  mc tasks create \"<title>\" [--description=\"...\"] [--priority=high|medium|low] [--tags=\"t1,t2\"] [--next-task='{\"title\":\"...\",\"description\":\"...\",\"priority\":\"medium\",\"tags\":[]}'] [--created-by=<value>] [--origin-channel=<value>] [--origin-message-url=<value>] [--isolation=worktree]")
+        print("  mc tasks update <id> [--status=<status>] [--notes=\"...\"] [--description=\"...\"] [--title=\"...\"] [--priority=high|medium|low] [--blocked-reason=\"...\"] [--next-task='{\"title\":\"...\"}'] [--isolation=worktree]")
         print("  mc ideas list")
         print("  mc ideas create \"<title>\" [--body=\"...\"] [--type=idea|spike]")
         print("  mc activity log \"<action>\" [--details=\"...\"]")
@@ -80,6 +80,17 @@ def main():
                 body["priority"] = flags["priority"]
             if "tags" in flags:
                 body["tags"] = [t.strip() for t in flags["tags"].split(",")]
+            if "next-task" in flags:
+                import json as _json
+                body["next_task"] = _json.loads(flags["next-task"])
+            if "created-by" in flags:
+                body["created_by"] = flags["created-by"]
+            if "origin-channel" in flags:
+                body["origin_channel"] = flags["origin-channel"]
+            if "origin-message-url" in flags:
+                body["origin_message_url"] = flags["origin-message-url"]
+            if "isolation" in flags:
+                body["isolation"] = flags["isolation"]
             result = api("POST", "/api/tasks", data=body)
         elif operation == "update":
             if not positional:
@@ -91,6 +102,19 @@ def main():
                 body["status"] = flags["status"]
             if "blocked-reason" in flags:
                 body["blocked_reason"] = flags["blocked-reason"]
+            if "notes" in flags:
+                body["notes"] = flags["notes"]
+            if "description" in flags:
+                body["description"] = flags["description"]
+            if "title" in flags:
+                body["title"] = flags["title"]
+            if "priority" in flags:
+                body["priority"] = flags["priority"]
+            if "next-task" in flags:
+                import json as _json
+                body["next_task"] = _json.loads(flags["next-task"])
+            if "isolation" in flags:
+                body["isolation"] = flags["isolation"] if flags["isolation"] != "null" else None
             result = api("PATCH", f"/api/tasks/{task_id}", data=body)
         else:
             print(f"Unknown tasks operation: {operation}", file=sys.stderr)
