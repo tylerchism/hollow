@@ -236,7 +236,7 @@ class TelegramBot:
         self.allowed_users: set[int] = set(config.telegram_allowed_users)
         self.app: Application | None = None
         self._queue = MessageQueue()
-        self._bg_tasks = BackgroundTaskManager()
+        self._bg_tasks = BackgroundTaskManager(data_dir=config.data_dir)
         self._start_time: float = time.time()
         self._offset_store = UpdateOffsetStore(
             str(config.data_dir / "hollow.db")
@@ -252,6 +252,9 @@ class TelegramBot:
         if not ok:
             log.error("Telegram startup aborted: %s", err)
             raise RuntimeError(f"Telegram token error: {err}")
+
+        # Initialize background task persistence DB
+        await self._bg_tasks.initialize()
 
         # Initialize offset store (reads persisted offset from DB)
         await self._offset_store.initialize()
@@ -636,6 +639,7 @@ class TelegramBot:
                         error_fn=_on_error,
                         channel_type="telegram",
                         channel_id=chat_id,
+                        original_message=message_text,
                     )
             except Exception:
                 log.exception("Error processing media message from chat %s", chat_id)

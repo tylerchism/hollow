@@ -228,7 +228,7 @@ class DiscordBot:
 
         # Dedup: message_id -> completed_at timestamp
         self._dedup_cache: dict[int, float] = {}
-        self._bg_tasks = BackgroundTaskManager()
+        self._bg_tasks = BackgroundTaskManager(data_dir=config.data_dir)
 
         # Agent name — used to namespace /tmp files so concurrent bots don't
         # clobber each other's active-channel state.
@@ -563,6 +563,7 @@ class DiscordBot:
                         error_fn=_on_error,
                         channel_type="discord",
                         channel_id=channel_id,
+                        original_message=message_text,
                     )
             except Exception:
                 log.exception("Discord: error processing message in channel %s", channel_id)
@@ -586,6 +587,9 @@ class DiscordBot:
         token = token or self.config.discord_bot_token or os.getenv("DISCORD_BOT_TOKEN", "")
         if not token:
             raise RuntimeError("DISCORD_BOT_TOKEN is not set")
+
+        # Initialize background task persistence DB
+        await self._bg_tasks.initialize()
 
         intents = discord.Intents.default()
         intents.message_content = True  # Required for reading message text

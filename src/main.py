@@ -303,6 +303,107 @@ async def _channel_already_responded(agent, chat_id: str, elapsed_seconds: float
     return False
 
 
+async def _recover_pending_tasks(config, agent, discord_bot, bot) -> None:
+    """Re-run any tasks that were in-flight when the process last died.
+
+    Reads the pending_tasks SQLite table from each channel's BackgroundTaskManager,
+    posts a recovery notice to each affected channel, then re-runs agent.reply()
+    with the original message.  The result is delivered normally through the
+    BackgroundTaskManager callback pipeline.
+    """
+    from src.channels.background_tasks import BackgroundTaskManager
+
+    managers: list[BackgroundTaskManager] = []
+    if discord_bot is not None:
+        managers.append(discord_bot._bg_tasks)
+    if bot is not None:
+        managers.append(bot._bg_tasks)
+
+    for mgr in managers:
+        pending = await mgr.load_pending()
+        if not pending:
+            continue
+        log.info("Recovering %d pending task(s) from previous run", len(pending))
+        for record in pending:
+            log.info(
+                "Recovering task %s: channel_type=%s channel_id=%s",
+                record.task_id, record.channel_type, record.channel_id,
+            )
+
+            # Build a delivery callback based on channel type
+            _channel_type = record.channel_type
+            _channel_id = record.channel_id
+            _original_message = record.original_message
+
+            async def _deliver_recovery(result: str, _ct=_channel_type, _cid=_channel_id) -> None:
+                if not result or not result.strip():
+                    result = "Task complete — no output was returned."
+                if _ct == "discord" and discord_bot is not None:
+                    try:
+                        channel = discord_bot._client and discord_bot._client.get_channel(int(_cid))
+                        if channel is not None:
+                            await discord_bot._send_chunked(channel, result)
+                        else:
+                            log.warning("Recovery: Discord channel %s not found", _cid)
+                    except Exception:
+                        log.exception("Recovery: failed to deliver to Discord channel %s", _cid)
+                elif _ct == "telegram" and bot is not None:
+                    try:
+                        for chunk_start in range(0, len(result), 4096):
+                            await bot.send_message(int(_cid), result[chunk_start : chunk_start + 4096])
+                    except Exception:
+                        log.exception("Recovery: failed to deliver to Telegram chat %s", _cid)
+
+            async def _error_recovery(exc: Exception, _ct=_channel_type, _cid=_channel_id) -> None:
+                msg = f"⚠️ Recovered task failed: {exc}"
+                if _ct == "discord" and discord_bot is not None:
+                    try:
+                        channel = discord_bot._client and discord_bot._client.get_channel(int(_cid))
+                        if channel is not None:
+                            await channel.send(msg)
+                    except Exception:
+                        pass
+                elif _ct == "telegram" and bot is not None:
+                    try:
+                        await bot.send_message(int(_cid), msg)
+                    except Exception:
+                        pass
+
+            # Post a recovery notice before re-running the task
+            notice = "⚠️ I restarted while working on your request. Picking up where I left off..."
+            try:
+                if _channel_type == "discord" and discord_bot is not None:
+                    channel = discord_bot._client and discord_bot._client.get_channel(int(_channel_id))
+                    if channel is not None:
+                        await channel.send(notice)
+                elif _channel_type == "telegram" and bot is not None:
+                    await bot.send_message(int(_channel_id), notice)
+            except Exception:
+                log.exception("Recovery: failed to send notice to %s/%s", _channel_type, _channel_id)
+
+            # Remove the old record and re-run the task via BackgroundTaskManager
+            # so it gets a fresh task_id and a new SQLite row.  The old row will
+            # be cleaned up by _delete_pending during the next register() → done cycle
+            # or on the next clean startup when load_pending() finds nothing.
+            reply_task = asyncio.create_task(
+                agent.reply(
+                    message=_original_message,
+                    chat_id=_channel_id,
+                    is_main_session=_channel_type == "telegram",
+                )
+            )
+            mgr.register(
+                task=reply_task,
+                deliver_fn=_deliver_recovery,
+                error_fn=_error_recovery,
+                channel_type=_channel_type,
+                channel_id=_channel_id,
+                original_message=_original_message,
+            )
+            # Remove the old stale record now that we've re-registered
+            await mgr._delete_pending(record.task_id)
+
+
 async def _send_startup_notification(config, agent, bot, discord_bot) -> None:
     """On restart: review recent context per-channel and proactively continue work."""
     import os
@@ -562,6 +663,13 @@ async def run(args: argparse.Namespace = None):
         scheduler.start()
         log.info("APScheduler started with %d job(s)", len(scheduler.get_jobs()))
 
+        # Recover any tasks that were in-flight when the process last died.
+        # Runs unconditionally (independent of startup_notification) so long-running
+        # tasks are always recovered even on agents with STARTUP_NOTIFICATION=false.
+        asyncio.create_task(
+            _recover_pending_tasks(config, agent, discord_bot, bot)
+        )
+
         # Send startup notification and proactively pick up where we left off.
         # Agents can set STARTUP_NOTIFICATION=false to suppress this (e.g. Flux,
         # whose #trader-bot channel is a conversation channel, not a monitoring
@@ -577,6 +685,7 @@ async def run(args: argparse.Namespace = None):
         log.info("Shutting down...")
         scheduler.shutdown(wait=False)
         if discord_bot:
+            await discord_bot._bg_tasks.shutdown()
             await discord_bot.stop()
             if discord_task and not discord_task.done():
                 discord_task.cancel()
@@ -585,6 +694,7 @@ async def run(args: argparse.Namespace = None):
                 except (asyncio.CancelledError, Exception):
                     pass
         if bot:
+            await bot._bg_tasks.shutdown()
             await bot.stop()
         await api_runner.cleanup()
         await agent.history.close()
