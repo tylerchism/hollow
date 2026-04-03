@@ -62,6 +62,7 @@ class PendingTask:
     channel_id: str
     original_message: str
     started_at: float
+    result_channel: str = ""  # For fire/api jobs: Discord channel name to post result
 
 
 class BackgroundTaskManager:
@@ -92,10 +93,20 @@ class BackgroundTaskManager:
                 channel_type    TEXT NOT NULL,
                 channel_id      TEXT NOT NULL,
                 original_message TEXT NOT NULL,
-                started_at      REAL NOT NULL
+                started_at      REAL NOT NULL,
+                result_channel  TEXT
             )
             """
         )
+        # Migration: add result_channel column if it doesn't exist yet
+        # (safe to run every startup — ALTER TABLE ADD COLUMN is idempotent-ish)
+        try:
+            await self._db.execute(
+                "ALTER TABLE pending_tasks ADD COLUMN result_channel TEXT"
+            )
+            await self._db.commit()
+        except Exception:
+            pass  # column already exists — not an error
         await self._db.commit()
         log.info("BackgroundTaskManager: SQLite pending_tasks initialised at %s", db_path)
 
@@ -118,6 +129,7 @@ class BackgroundTaskManager:
         channel_type: str,
         channel_id: str,
         original_message: str = "",
+        result_channel: str = "",
     ) -> str:
         """Register *task* for background delivery.
 
@@ -162,7 +174,7 @@ class BackgroundTaskManager:
 
         # Persist to SQLite (fire-and-forget; failure is logged but non-fatal)
         asyncio.create_task(
-            self._persist(task_id, channel_type, channel_id, original_message, started_at),
+            self._persist(task_id, channel_type, channel_id, original_message, started_at, result_channel),
             name=f"bg_persist_{task_id}",
         )
 
@@ -182,7 +194,7 @@ class BackgroundTaskManager:
             return []
         try:
             cursor = await self._db.execute(
-                "SELECT task_id, channel_type, channel_id, original_message, started_at "
+                "SELECT task_id, channel_type, channel_id, original_message, started_at, result_channel "
                 "FROM pending_tasks ORDER BY started_at ASC"
             )
             rows = await cursor.fetchall()
@@ -193,6 +205,7 @@ class BackgroundTaskManager:
                     channel_id=row[2],
                     original_message=row[3],
                     started_at=row[4],
+                    result_channel=row[5] or "",
                 )
                 for row in rows
             ]
@@ -228,6 +241,7 @@ class BackgroundTaskManager:
         channel_id: str,
         original_message: str,
         started_at: float,
+        result_channel: str = "",
     ) -> None:
         """Write a pending task record to SQLite."""
         if self._db is None:
@@ -235,9 +249,9 @@ class BackgroundTaskManager:
         try:
             await self._db.execute(
                 "INSERT OR REPLACE INTO pending_tasks "
-                "(task_id, channel_type, channel_id, original_message, started_at) "
-                "VALUES (?, ?, ?, ?, ?)",
-                (task_id, channel_type, channel_id, original_message, started_at),
+                "(task_id, channel_type, channel_id, original_message, started_at, result_channel) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (task_id, channel_type, channel_id, original_message, started_at, result_channel or ""),
             )
             await self._db.commit()
         except Exception:

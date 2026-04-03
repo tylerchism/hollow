@@ -4,8 +4,11 @@ import argparse
 import asyncio
 import json
 import logging
+import os
 import signal
 import sys
+import time as _time_module
+import uuid
 from pathlib import Path
 
 from aiohttp import web
@@ -19,6 +22,35 @@ from src.memory import MemoryManager
 from src.snapshot import read_snapshot, write_snapshot
 
 log = logging.getLogger(__name__)
+
+# In-memory store for fire job results.
+# Key: job_id (e.g. "fire_abc12345")
+# Value: {"status": "pending|done|error", "response": str|None, "created_at": float}
+_fire_jobs: dict[str, dict] = {}
+
+# Max concurrent fire jobs (active, not queued) — configurable via env var.
+FIRE_CONCURRENCY_LIMIT = int(os.environ.get("FIRE_CONCURRENCY_LIMIT", "2"))
+
+# Fire job results expire after 1 hour.
+_FIRE_JOB_TTL_SECS = 3600
+
+
+def _fire_job_id() -> str:
+    """Generate a fire job ID: 'fire_' + first 8 hex chars of a UUID4."""
+    return "fire_" + uuid.uuid4().hex[:8]
+
+
+def _sweep_stale_fire_jobs() -> None:
+    """Remove fire job records older than _FIRE_JOB_TTL_SECS from _fire_jobs."""
+    now = _time_module.time()
+    stale = [
+        jid for jid, rec in _fire_jobs.items()
+        if now - rec.get("created_at", 0) > _FIRE_JOB_TTL_SECS
+    ]
+    for jid in stale:
+        del _fire_jobs[jid]
+    if stale:
+        log.debug("Swept %d stale fire job(s)", len(stale))
 
 
 def make_api_app(
@@ -205,9 +237,188 @@ def make_api_app(
         )
         return web.json_response({"status": "ok", "bg_tasks": len(bg_tasks), "cron_jobs": len(cron_jobs)})
 
+    # ── /fire endpoint ────────────────────────────────────────────────────────
+
+    async def handle_fire(request: web.Request) -> web.Response:
+        """POST /fire — queue work async, return job_id immediately (<1s).
+
+        Accepts same payload as /ask: message, chat_id, context, idempotency_key,
+        result_channel.
+
+        Returns {"job_id": "fire_<uuid8>", "status": "queued"} immediately.
+        If at FIRE_CONCURRENCY_LIMIT: also returns queue_position.
+        If idempotency_key matches existing job: returns that job's id.
+        """
+        _sweep_stale_fire_jobs()
+
+        try:
+            data = await request.json()
+        except Exception:
+            return web.json_response({"error": "invalid JSON"}, status=400)
+
+        message = data.get("message", "").strip()
+        if not message:
+            return web.json_response({"error": "message is required"}, status=400)
+
+        chat_id = data.get("chat_id", "fire_api")
+        context_injection = data.get("context", "").strip()
+        idempotency_key = data.get("idempotency_key", "").strip()
+        result_channel = data.get("result_channel", "").strip()
+
+        # Idempotency: return existing job if key matches
+        if idempotency_key:
+            for jid, rec in _fire_jobs.items():
+                if rec.get("idempotency_key") == idempotency_key:
+                    log.info("/fire idempotency hit: %s -> %s", idempotency_key, jid)
+                    return web.json_response({"job_id": jid, "status": rec["status"]})
+
+        job_id = _fire_job_id()
+        _fire_jobs[job_id] = {
+            "status": "pending",
+            "response": None,
+            "created_at": _time_module.time(),
+            "idempotency_key": idempotency_key,
+            "result_channel": result_channel,
+        }
+
+        # Count active (non-pending-queued) fire jobs
+        active_count = sum(
+            1 for rec in _fire_jobs.values()
+            if rec["status"] == "pending" and rec.get("_task") is not None
+        )
+        queue_position = max(0, active_count - FIRE_CONCURRENCY_LIMIT + 1)
+
+        # Deliver fn: store result in _fire_jobs and optionally post to Discord
+        async def _fire_deliver(result: str, _jid: str = job_id, _rc: str = result_channel) -> None:
+            if _jid in _fire_jobs:
+                _fire_jobs[_jid]["status"] = "done"
+                _fire_jobs[_jid]["response"] = result
+            log.info("/fire job %s completed (%d chars)", _jid, len(result or ""))
+            if _rc and discord_bot is not None:
+                try:
+                    # Post result to named Discord channel.
+                    # send_to_named_channel uses discord.utils.get internally.
+                    # We also try fetch_channel fallback for guild-cache timing issues.
+                    if discord_bot._client:
+                        sent_any = False
+                        for guild in discord_bot._client.guilds:
+                            sent = await discord_bot.send_to_named_channel(guild, _rc, result or "(empty)")
+                            if sent:
+                                sent_any = True
+                        if not sent_any:
+                            log.warning("/fire job %s: result_channel '#%s' not found on any guild", _jid, _rc)
+                except Exception:
+                    log.exception("/fire job %s: failed to post to result_channel '%s'", _jid, _rc)
+
+        async def _fire_error(exc: Exception, _jid: str = job_id) -> None:
+            if _jid in _fire_jobs:
+                _fire_jobs[_jid]["status"] = "error"
+                _fire_jobs[_jid]["response"] = str(exc)
+            log.error("/fire job %s error: %s", _jid, exc)
+
+        # Create and register the background task
+        _bg = discord_bot._bg_tasks if discord_bot is not None else None
+        if _bg is None:
+            # No bg manager — create a standalone task + done callback
+            reply_task = asyncio.create_task(
+                agent.reply(
+                    message=message,
+                    chat_id=chat_id,
+                    is_main_session=False,
+                    context_injection=context_injection,
+                ),
+                name=f"fire_{job_id}",
+            )
+
+            def _done_cb(t: asyncio.Task, _jid: str = job_id) -> None:
+                asyncio.create_task(_fire_done_cb(t, _jid))
+
+            async def _fire_done_cb(t: asyncio.Task, _jid: str) -> None:
+                if t.cancelled():
+                    if _jid in _fire_jobs:
+                        _fire_jobs[_jid]["status"] = "error"
+                        _fire_jobs[_jid]["response"] = "cancelled"
+                    return
+                exc = t.exception()
+                if exc is not None:
+                    await _fire_error(exc, _jid=_jid)
+                else:
+                    await _fire_deliver(t.result() or "", _jid=_jid)
+
+            reply_task.add_done_callback(_done_cb)
+            _fire_jobs[job_id]["_task"] = True
+        else:
+            reply_task = asyncio.create_task(
+                agent.reply(
+                    message=message,
+                    chat_id=chat_id,
+                    is_main_session=False,
+                    context_injection=context_injection,
+                ),
+                name=f"fire_{job_id}",
+            )
+            _bg.register(
+                task=reply_task,
+                deliver_fn=_fire_deliver,
+                error_fn=_fire_error,
+                channel_type="fire",
+                channel_id=job_id,
+                original_message=message,
+                result_channel=result_channel,
+            )
+            _fire_jobs[job_id]["_task"] = True
+
+        log.info("/fire queued job %s (active=%d, limit=%d)", job_id, active_count + 1, FIRE_CONCURRENCY_LIMIT)
+
+        resp: dict = {"job_id": job_id, "status": "queued"}
+        if queue_position > 0:
+            resp["queue_position"] = queue_position
+        return web.json_response(resp)
+
+    # ── /result/{job_id} endpoint ─────────────────────────────────────────────
+
+    async def handle_result(request: web.Request) -> web.Response:
+        """GET /result/{job_id} — return status and response for a fire job."""
+        job_id = request.match_info.get("job_id", "").strip()
+        if not job_id:
+            return web.json_response({"error": "job_id is required"}, status=400)
+
+        rec = _fire_jobs.get(job_id)
+        if rec is None:
+            return web.json_response({"status": "not_found", "job_id": job_id}, status=404)
+
+        result: dict = {"job_id": job_id, "status": rec["status"]}
+        if rec["status"] in ("done", "error") and rec.get("response") is not None:
+            result["response"] = rec["response"]
+        return web.json_response(result)
+
+    # ── /jobs endpoint ─────────────────────────────────────────────────────────
+
+    async def handle_jobs(request: web.Request) -> web.Response:
+        """GET /jobs — list all known fire jobs and their statuses."""
+        jobs = []
+        for jid, rec in _fire_jobs.items():
+            entry: dict = {
+                "job_id": jid,
+                "status": rec["status"],
+                "created_at": rec.get("created_at"),
+            }
+            if rec.get("idempotency_key"):
+                entry["idempotency_key"] = rec["idempotency_key"]
+            if rec.get("result_channel"):
+                entry["result_channel"] = rec["result_channel"]
+            if rec["status"] in ("done", "error") and rec.get("response") is not None:
+                entry["response"] = rec["response"]
+            jobs.append(entry)
+        jobs.sort(key=lambda j: j.get("created_at") or 0)
+        return web.json_response({"jobs": jobs, "total": len(jobs)})
+
     app = web.Application()
     app.router.add_get("/health", handle_health)
     app.router.add_post("/ask", handle_ask)
+    app.router.add_post("/fire", handle_fire)
+    app.router.add_get("/result/{job_id}", handle_result)
+    app.router.add_get("/jobs", handle_jobs)
     app.router.add_get("/history/{channel_name}", handle_history)
     app.router.add_post("/snapshot", handle_snapshot)
     return app
@@ -454,31 +665,74 @@ async def _recover_pending_tasks(config, agent, discord_bot) -> None:
             _channel_type = record.channel_type
             _channel_id = record.channel_id
             _original_message = record.original_message
+            _result_channel = record.result_channel  # non-empty for fire/api jobs with Discord delivery
 
-            async def _deliver_recovery(result: str, _ct=_channel_type, _cid=_channel_id) -> None:
-                if not result or not result.strip():
-                    result = "Task complete — no output was returned."
-                if _ct == "discord" and discord_bot is not None:
-                    try:
-                        channel = discord_bot._client and discord_bot._client.get_channel(int(_cid))
-                        if channel is not None:
-                            await discord_bot._send_chunked(channel, result)
-                        else:
-                            log.warning("Recovery: Discord channel %s not found", _cid)
-                    except Exception:
-                        log.exception("Recovery: failed to deliver to Discord channel %s", _cid)
+            # Fire/api jobs: re-register in _fire_jobs so /result polling still works,
+            # and deliver to Discord result_channel if configured.
+            if _channel_type in ("fire", "api"):
+                _job_id = _channel_id
+                # Re-register the job in _fire_jobs so /result can track it
+                if _job_id not in _fire_jobs:
+                    _fire_jobs[_job_id] = {
+                        "status": "pending",
+                        "response": None,
+                        "created_at": _time_module.time(),
+                        "idempotency_key": "",
+                        "result_channel": _result_channel,
+                    }
 
-            async def _error_recovery(exc: Exception, _ct=_channel_type, _cid=_channel_id) -> None:
-                msg = f"⚠️ Recovered task failed: {exc}"
-                if _ct == "discord" and discord_bot is not None:
-                    try:
-                        channel = discord_bot._client and discord_bot._client.get_channel(int(_cid))
-                        if channel is not None:
-                            await channel.send(msg)
-                    except Exception:
-                        pass
+                async def _deliver_recovery(
+                    result: str, _jid=_job_id, _rc=_result_channel
+                ) -> None:
+                    if _jid in _fire_jobs:
+                        _fire_jobs[_jid]["status"] = "done"
+                        _fire_jobs[_jid]["response"] = result
+                    log.info("Recovery: fire job %s completed (%d chars)", _jid, len(result or ""))
+                    if _rc and discord_bot is not None:
+                        try:
+                            if discord_bot._client:
+                                sent_any = False
+                                for guild in discord_bot._client.guilds:
+                                    sent = await discord_bot.send_to_named_channel(guild, _rc, result or "(empty)")
+                                    if sent:
+                                        sent_any = True
+                                if not sent_any:
+                                    log.warning("Recovery: result_channel '#%s' not found on any guild", _rc)
+                        except Exception:
+                            log.exception("Recovery: failed to post fire job %s to result_channel '%s'", _jid, _rc)
+
+                async def _error_recovery(exc: Exception, _jid=_job_id) -> None:
+                    if _jid in _fire_jobs:
+                        _fire_jobs[_jid]["status"] = "error"
+                        _fire_jobs[_jid]["response"] = str(exc)
+                    log.error("Recovery: fire job %s error: %s", _jid, exc)
+
+            else:
+                async def _deliver_recovery(result: str, _ct=_channel_type, _cid=_channel_id) -> None:
+                    if not result or not result.strip():
+                        result = "Task complete — no output was returned."
+                    if _ct == "discord" and discord_bot is not None:
+                        try:
+                            channel = discord_bot._client and discord_bot._client.get_channel(int(_cid))
+                            if channel is not None:
+                                await discord_bot._send_chunked(channel, result)
+                            else:
+                                log.warning("Recovery: Discord channel %s not found", _cid)
+                        except Exception:
+                            log.exception("Recovery: failed to deliver to Discord channel %s", _cid)
+
+                async def _error_recovery(exc: Exception, _ct=_channel_type, _cid=_channel_id) -> None:
+                    msg = f"⚠️ Recovered task failed: {exc}"
+                    if _ct == "discord" and discord_bot is not None:
+                        try:
+                            channel = discord_bot._client and discord_bot._client.get_channel(int(_cid))
+                            if channel is not None:
+                                await channel.send(msg)
+                        except Exception:
+                            pass
 
             # Post a recovery notice before re-running the task
+            # (only for user-facing channels, not fire/api jobs)
             notice = "⚠️ I restarted while working on your request. Picking up where I left off..."
             try:
                 if _channel_type == "discord" and discord_bot is not None:
