@@ -52,7 +52,7 @@ def main():
         print("Usage: mc <resource> <operation> [args]")
         print("  mc tasks list [--status=<status>]")
         print("  mc tasks create \"<title>\" [--description=\"...\"] [--priority=high|medium|low] [--tags=\"t1,t2\"] [--next-task='{\"title\":\"...\",\"description\":\"...\",\"priority\":\"medium\",\"tags\":[]}'] [--created-by=<value>] [--origin-channel=<value>] [--origin-message-url=<value>] [--isolation=worktree]")
-        print("  mc tasks update <id> [--status=<status>] [--notes=\"...\"] [--description=\"...\"] [--title=\"...\"] [--priority=high|medium|low] [--blocked-reason=\"...\"] [--next-task='{\"title\":\"...\"}'] [--isolation=worktree]")
+        print("  mc tasks update <id> [--status=<status>] [--notes=\"...\"] [--description=\"...\"] [--title=\"...\"] [--priority=high|medium|low] [--blocked-reason=\"...\"] [--next-task='{\"title\":\"...\"}'] [--isolation=worktree] [--heartbeat-at=<iso8601>] [--lease-expires-at=<iso8601>] [--locked-by=<executor>]")
         print("  mc ideas list")
         print("  mc ideas create \"<title>\" [--body=\"...\"] [--type=idea|spike]")
         print("  mc activity log \"<action>\" [--details=\"...\"]")
@@ -102,6 +102,12 @@ def main():
                 body["status"] = flags["status"]
             if "blocked-reason" in flags:
                 body["blocked_reason"] = flags["blocked-reason"]
+            if "heartbeat-at" in flags:
+                body["heartbeat_at"] = flags["heartbeat-at"]
+            if "lease-expires-at" in flags:
+                body["lease_expires_at"] = flags["lease-expires-at"]
+            if "locked-by" in flags:
+                body["locked_by"] = flags["locked-by"]
             if "notes" in flags:
                 body["notes"] = flags["notes"]
             if "description" in flags:
