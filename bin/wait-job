@@ -1,29 +1,34 @@
 #!/usr/bin/env bash
-# bin/wait-job <agent> <job_id> [--task-id <mc_task_id>]
+# bin/wait-job <agent> <job_id> [--task-id <mc_task_id>] [--max-minutes <N>]
 #
 # Polls /result/<job_id> on the target agent every 30s.
 # On each poll, heartbeats the MC task if --task-id provided.
 #
-# Exits 0 with response on stdout on success.
-# Exits 1 with error message on stderr on error.
-# Exits 2 on timeout (>120 polls = 60 min).
+# Exit codes:
+#   0 — done (response printed to stdout)
+#   1 — error (job failed; error message on stderr)
+#   2 — cancelled or 404 (agent restarted; caller should re-fire)
+#   3 — timeout (--max-minutes exceeded)
 
 set -euo pipefail
 
 HOLLOW_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 CONFIG="$HOLLOW_ROOT/hollow.config.json"
-MC_BASE="http://localhost:3333"
-MC_API_KEY="462f220e3c3f15324825a86373da874f92302bf6fc646e3330731468cc959c22"
+MC_BASE="${MC_BASE_URL:-http://localhost:3333}"
+MC_API_KEY="${MC_API_KEY:-462f220e3c3f15324825a86373da874f92302bf6fc646e3330731468cc959c22}"
 
 POLL_INTERVAL=30
-MAX_POLLS=120   # 120 * 30s = 60 minutes
+MAX_MINUTES=120
 
 usage() {
-    echo "Usage: wait-job <agent> <job_id> [--task-id <mc_task_id>]" >&2
+    echo "Usage: wait-job <agent> <job_id> [--task-id <mc_task_id>] [--max-minutes <N>]" >&2
     echo "" >&2
-    echo "  <agent>    Agent name (used to resolve port from hollow.config.json)" >&2
-    echo "  <job_id>   Fire job ID returned by /fire or hail --detach" >&2
-    echo "  --task-id  MC task ID to heartbeat on each poll" >&2
+    echo "  <agent>          Agent name (resolves port from hollow.config.json)" >&2
+    echo "  <job_id>         Fire job ID from /fire or hail --detach" >&2
+    echo "  --task-id        MC task ID to heartbeat on each poll" >&2
+    echo "  --max-minutes    Max wait time in minutes (default: 120)" >&2
+    echo "" >&2
+    echo "Exit codes: 0=done  1=error  2=cancelled/404  3=timeout" >&2
     exit 1
 }
 
@@ -42,6 +47,10 @@ while [[ $# -gt 0 ]]; do
             TASK_ID="${2:-}"
             shift 2
             ;;
+        --max-minutes)
+            MAX_MINUTES="${2:-120}"
+            shift 2
+            ;;
         *)
             echo "Unknown argument: $1" >&2
             usage
@@ -49,12 +58,18 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+MAX_POLLS=$(( (MAX_MINUTES * 60 + POLL_INTERVAL - 1) / POLL_INTERVAL ))
+
 # Resolve agent port from hollow.config.json
 resolve_port() {
     local name="$1"
     python3 - <<PYEOF
 import json, sys
-cfg = json.loads(open('$CONFIG').read())
+try:
+    cfg = json.loads(open('$CONFIG').read())
+except Exception as e:
+    print(f'Error reading config: {e}', file=sys.stderr)
+    sys.exit(1)
 name = '$name'.lower()
 
 # Check coordinator
@@ -70,7 +85,6 @@ for agent in cfg.get('agents', []):
         print(agent['port'])
         sys.exit(0)
 
-print('', end='')
 sys.exit(1)
 PYEOF
 }
@@ -78,7 +92,7 @@ PYEOF
 PORT="$(resolve_port "$AGENT_NAME")"
 if [[ -z "$PORT" ]]; then
     echo "Error: unknown agent '$AGENT_NAME' — not found in hollow.config.json" >&2
-    exit 1
+    exit 2
 fi
 
 RESULT_BASE="http://127.0.0.1:${PORT}"
@@ -89,10 +103,12 @@ heartbeat_task() {
     if [[ -z "$TASK_ID" ]]; then
         return 0
     fi
-    local now
-    local lease
+    local now lease
     now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-    lease="$(date -u -d '+120 minutes' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date -u -v+120M +%Y-%m-%dT%H:%M:%SZ)"
+    # GNU date vs macOS date
+    lease="$(date -u -d '+120 minutes' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
+        || date -u -v+120M +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
+        || echo "$now")"
     curl -s -X PATCH "${MC_BASE}/api/tasks/${TASK_ID}" \
         -H "Content-Type: application/json" \
         -H "x-api-key: ${MC_API_KEY}" \
@@ -100,7 +116,7 @@ heartbeat_task() {
         > /dev/null 2>&1 || true
 }
 
-echo "wait-job: polling ${RESULT_URL} every ${POLL_INTERVAL}s (max ${MAX_POLLS} polls = $((MAX_POLLS * POLL_INTERVAL / 60)) min)" >&2
+echo "wait-job: polling ${RESULT_URL} every ${POLL_INTERVAL}s (max ${MAX_MINUTES} min = ${MAX_POLLS} polls)" >&2
 if [[ -n "$TASK_ID" ]]; then
     echo "wait-job: heartbeating MC task ${TASK_ID} on each poll" >&2
 fi
@@ -113,15 +129,16 @@ while [[ $poll_count -lt $MAX_POLLS ]]; do
     heartbeat_task
 
     # Poll /result/<job_id>
-    http_code=""
+    http_status=""
     response_body=""
-    response_body="$(curl -s -w '\n__HTTP_CODE__:%{http_code}' "${RESULT_URL}" 2>/dev/null || true)"
-    http_code="$(echo "$response_body" | grep -o '__HTTP_CODE__:[0-9]*' | cut -d: -f2)"
-    response_body="$(echo "$response_body" | sed 's/__HTTP_CODE__:[0-9]*$//')"
+    full_output="$(curl -s -w '\n__HTTP_CODE__:%{http_code}' "${RESULT_URL}" 2>/dev/null || true)"
+    http_status="$(printf '%s' "$full_output" | grep -o '__HTTP_CODE__:[0-9]*' | cut -d: -f2)"
+    response_body="$(printf '%s' "$full_output" | sed 's/__HTTP_CODE__:[0-9]*$//' | sed '/^[[:space:]]*$/d')"
 
-    if [[ "$http_code" == "404" ]]; then
-        echo "wait-job: job ${JOB_ID} not found (404) — agent may have restarted" >&2
-        exit 1
+    # 404 means the job doesn't exist — agent restarted or TTL expired
+    if [[ "$http_status" == "404" ]]; then
+        echo "wait-job: job ${JOB_ID} not found (404) — agent restarted or job expired" >&2
+        exit 2
     fi
 
     if [[ -z "$response_body" ]]; then
@@ -130,22 +147,26 @@ while [[ $poll_count -lt $MAX_POLLS ]]; do
         continue
     fi
 
-    status="$(echo "$response_body" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('status','pending'))" 2>/dev/null || echo 'pending')"
+    status="$(printf '%s' "$response_body" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('status','pending'))" 2>/dev/null || echo 'pending')"
 
     case "$status" in
         done)
-            result="$(echo "$response_body" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('response',''))" 2>/dev/null || echo '')"
+            result="$(printf '%s' "$response_body" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('response',''))" 2>/dev/null || echo '')"
             echo "$result"
             exit 0
             ;;
         error)
-            err="$(echo "$response_body" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('response','unknown error'))" 2>/dev/null || echo 'unknown error')"
+            err="$(printf '%s' "$response_body" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('response','unknown error'))" 2>/dev/null || echo 'unknown error')"
             echo "wait-job: job ${JOB_ID} failed: ${err}" >&2
             exit 1
             ;;
+        cancelled)
+            echo "wait-job: job ${JOB_ID} was cancelled" >&2
+            exit 2
+            ;;
         not_found)
             echo "wait-job: job ${JOB_ID} not found" >&2
-            exit 1
+            exit 2
             ;;
         pending)
             echo "wait-job: poll ${poll_count}/${MAX_POLLS} — still pending..." >&2
@@ -158,5 +179,5 @@ while [[ $poll_count -lt $MAX_POLLS ]]; do
     esac
 done
 
-echo "wait-job: timeout after $((MAX_POLLS * POLL_INTERVAL / 60)) minutes waiting for job ${JOB_ID}" >&2
-exit 2
+echo "wait-job: timeout after ${MAX_MINUTES} minutes waiting for job ${JOB_ID}" >&2
+exit 3
