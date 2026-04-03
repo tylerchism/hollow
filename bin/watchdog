@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 """
-watchdog — Ping all hollow agents, send Telegram alert if any are unresponsive.
+watchdog — Ping all hollow agents, send Discord alert if any are unresponsive.
 
 Usage:
     watchdog               # Check all agents, alert on failures
@@ -41,7 +41,8 @@ LOCK_FILE     = Path("/tmp/hollow-watchdog.lock")
 
 HEALTH_TIMEOUT  = 5       # seconds per agent health check
 COOLDOWN_MINUTES = 15     # don't re-alert same agent within this window
-TYLER_CHAT_ID   = 0  # static fallback — set HEARTBEAT_CHAT_ID in agents/tarn/.env
+# Discord channel name to send watchdog alerts to (must match a real channel name)
+DISCORD_ALERT_CHANNEL = "tarn"
 # Maximum age (seconds) of a stale lock before we override it.
 # This should exceed the worst-case single-run time (9 agents × 5s timeout + 15s restart wait).
 LOCK_MAX_AGE_SEC = 180
@@ -76,37 +77,81 @@ def load_env(path: Path) -> dict:
     return env
 
 
-def get_telegram_token() -> Optional[str]:
+def get_discord_token() -> Optional[str]:
     env = load_env(TARN_ENV)
-    return env.get("TELEGRAM_BOT_TOKEN")
+    return env.get("DISCORD_BOT_TOKEN")
 
 
-def get_heartbeat_chat_id() -> int:
-    env = load_env(TARN_ENV)
-    val = env.get("HEARTBEAT_CHAT_ID")
-    if val:
-        try:
-            return int(val)
-        except ValueError:
-            pass
-    return TYLER_CHAT_ID
+def send_discord(token: str, channel_name: str, text: str) -> bool:
+    """Send a message to a named Discord channel via the bot API.
 
+    Fetches guild list, then channel list, then posts to the first matching channel.
+    Returns True on success, False on failure.
+    """
+    headers = {
+        "Authorization": f"Bot {token}",
+        "Content-Type": "application/json",
+    }
 
-def send_telegram(token: str, chat_id: int, text: str) -> bool:
-    payload = json.dumps({"chat_id": chat_id, "text": text}).encode()
-    req = urllib.request.Request(
-        f"https://api.telegram.org/bot{token}/sendMessage",
-        data=payload,
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-    try:
+    def _api_get(path: str):
+        req = urllib.request.Request(
+            f"https://discord.com/api/v10{path}",
+            headers=headers,
+            method="GET",
+        )
         with urllib.request.urlopen(req, timeout=10) as resp:
-            result = json.load(resp)
-            return result.get("ok", False)
+            return json.load(resp)
+
+    try:
+        guilds = _api_get("/users/@me/guilds")
+        if not isinstance(guilds, list):
+            log(f"Discord send failed: unexpected guilds response: {guilds}")
+            return False
     except Exception as e:
-        log(f"Telegram send failed: {e}")
+        log(f"Discord send failed (guilds fetch): {e}")
         return False
+
+    channel_name_lower = channel_name.lower()
+
+    for guild in guilds:
+        guild_id = guild.get("id")
+        if not guild_id:
+            continue
+        try:
+            channels = _api_get(f"/guilds/{guild_id}/channels")
+        except Exception as e:
+            log(f"Discord send failed (channels fetch for guild {guild_id}): {e}")
+            continue
+
+        channel_id = None
+        for ch in channels:
+            if ch.get("type") == 0 and ch.get("name", "").lower() == channel_name_lower:
+                channel_id = ch.get("id")
+                break
+
+        if not channel_id:
+            continue
+
+        payload = json.dumps({"content": text}).encode()
+        req = urllib.request.Request(
+            f"https://discord.com/api/v10/channels/{channel_id}/messages",
+            data=payload,
+            headers=headers,
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                result = json.load(resp)
+                if "id" in result:
+                    return True
+                log(f"Discord send failed (post): {result}")
+                return False
+        except Exception as e:
+            log(f"Discord send failed (post to channel {channel_id}): {e}")
+            return False
+
+    log(f"Discord send failed: channel '#{channel_name}' not found on any guild")
+    return False
 
 
 def ping_agent(name: str, port: int) -> tuple[bool, str, dict]:
@@ -153,7 +198,7 @@ def in_cooldown(state: dict, name: str) -> bool:
     return elapsed < (COOLDOWN_MINUTES * 60)
 
 
-def check_bot_health(name: str, port: int, token: Optional[str], chat_id: int) -> None:
+def check_bot_health(name: str, port: int, discord_token: Optional[str]) -> None:
     """After a successful restart, verify bots are connected; alert if not."""
     _, _, bots = ping_agent(name, port)
     if not bots:
@@ -168,11 +213,11 @@ def check_bot_health(name: str, port: int, token: Optional[str], chat_id: int) -
         f"{', '.join(deaf)}. Check logs manually."
     )
     log(f"  bot health: {msg}")
-    if token:
-        send_telegram(token, chat_id, msg)
+    if discord_token:
+        send_discord(discord_token, DISCORD_ALERT_CHANNEL, msg)
 
 
-def try_restart(name: str, port: int, token: Optional[str] = None, chat_id: int = TYLER_CHAT_ID) -> bool:
+def try_restart(name: str, port: int, discord_token: Optional[str] = None) -> bool:
     """
     Restart a dead agent using bin/restart-agent.
 
@@ -239,7 +284,7 @@ def try_restart(name: str, port: int, token: Optional[str] = None, chat_id: int 
     healthy, detail, _ = ping_agent(name, port)
     if healthy:
         log(f"  restart: {name} is back up (via restart-agent)")
-        check_bot_health(name, port, token, chat_id)
+        check_bot_health(name, port, discord_token)
         return True
     else:
         log(f"  restart: {name} still down after restart-agent — {detail}")
@@ -313,13 +358,12 @@ def main() -> None:
 
 
 def _main(args) -> None:
-    cfg     = load_config()
-    token   = get_telegram_token()
-    chat_id = get_heartbeat_chat_id()
-    state   = load_state()
+    cfg           = load_config()
+    discord_token = get_discord_token()
+    state         = load_state()
 
-    if not token:
-        log("ERROR: TELEGRAM_BOT_TOKEN not found — alerts will not be sent")
+    if not discord_token:
+        log("ERROR: DISCORD_BOT_TOKEN not found — alerts will not be sent")
 
     # Build agent list from config
     agents = [{"name": cfg["coordinator"]["name"], "port": cfg["coordinator"]["port"]}]
@@ -351,7 +395,7 @@ def _main(args) -> None:
             log(f"  ✗ {name}:{port} — {detail}")
 
             if args.restart:
-                restarted = try_restart(name, port, token=token, chat_id=chat_id)
+                restarted = try_restart(name, port, discord_token=discord_token)
                 if restarted:
                     fixed.append(name)
                     if name in state:
@@ -393,17 +437,17 @@ def _main(args) -> None:
 
     log(f"Sending alert for: {[d['name'] for d in alertable]}")
 
-    if token:
-        sent = send_telegram(token, chat_id, alert_msg)
+    if discord_token:
+        sent = send_discord(discord_token, DISCORD_ALERT_CHANNEL, alert_msg)
         if sent:
-            log("Telegram alert sent.")
+            log(f"Discord alert sent to #{DISCORD_ALERT_CHANNEL}.")
             for d in alertable:
                 state.setdefault(d["name"], {})["last_alert_ts"] = time.time()
             save_state(state)
         else:
-            log("Telegram alert FAILED.")
+            log("Discord alert FAILED.")
     else:
-        log("No token — would have sent:")
+        log("No Discord token — would have sent:")
         log(alert_msg)
 
 

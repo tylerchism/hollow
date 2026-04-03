@@ -1,13 +1,11 @@
 #!/usr/bin/env bash
-# send_msg — Send an interim message on whichever channel is currently active.
+# send_msg — Send an interim message on the currently active Discord channel.
 #
 # Usage: send_msg [-a <agent>] "message text"
 #        send_msg "message text"   (defaults to HOLLOW_AGENT env var, then "tarn")
 #
-# Checks both /tmp/hollow_active_discord_<agent> (Discord) and
-# /tmp/hollow_active_chat_<agent> (Telegram) and sends to whichever received the
-# most recent inbound message. If only one is set, uses that one.
-# If neither is set, exits with error.
+# Checks /tmp/hollow_active_discord_<agent> and sends to that channel.
+# If no active Discord channel is set, exits with error.
 #
 # The agent name is resolved in this order:
 #   1. -a <agent> flag
@@ -15,7 +13,7 @@
 #   3. Default: "tarn"
 #
 # This is the unified interim-messaging script for soul.md.
-# Individual channel scripts (send_tg, send_discord) still work directly.
+# Telegram has been removed; Discord is the only channel.
 
 set -euo pipefail
 
@@ -44,47 +42,16 @@ fi
 MESSAGE="$*"
 
 DISCORD_ACTIVE_FILE="/tmp/hollow_active_discord_${AGENT_NAME}"
-TELEGRAM_ACTIVE_FILE="/tmp/hollow_active_chat_${AGENT_NAME}"
-DISCORD_TS_FILE="/tmp/hollow_active_discord_ts_${AGENT_NAME}"
-TELEGRAM_TS_FILE="/tmp/hollow_active_telegram_ts_${AGENT_NAME}"
 
-DISCORD_CHANNEL=""
-TELEGRAM_CHAT=""
-DISCORD_TS=0
-TELEGRAM_TS=0
-
-if [[ -f "$DISCORD_ACTIVE_FILE" ]]; then
-    DISCORD_CHANNEL="$(cat "$DISCORD_ACTIVE_FILE")"
-    if [[ -f "$DISCORD_TS_FILE" ]]; then
-        DISCORD_TS="$(cat "$DISCORD_TS_FILE")"
-    else
-        DISCORD_TS="$(stat -c %Y "$DISCORD_ACTIVE_FILE" 2>/dev/null || echo 0)"
-    fi
-fi
-
-if [[ -f "$TELEGRAM_ACTIVE_FILE" ]]; then
-    TELEGRAM_CHAT="$(cat "$TELEGRAM_ACTIVE_FILE")"
-    if [[ -f "$TELEGRAM_TS_FILE" ]]; then
-        TELEGRAM_TS="$(cat "$TELEGRAM_TS_FILE")"
-    else
-        TELEGRAM_TS="$(stat -c %Y "$TELEGRAM_ACTIVE_FILE" 2>/dev/null || echo 0)"
-    fi
-fi
-
-if [[ -z "$DISCORD_CHANNEL" && -z "$TELEGRAM_CHAT" ]]; then
-    echo "send_msg: no active channel (no inbound message received yet on any channel)" >&2
+if [[ ! -f "$DISCORD_ACTIVE_FILE" ]]; then
+    echo "send_msg: no active Discord channel (no inbound message received yet)" >&2
     exit 1
 fi
 
-# Use whichever channel received a message most recently
-if [[ -n "$DISCORD_CHANNEL" && -n "$TELEGRAM_CHAT" ]]; then
-    if [[ "$DISCORD_TS" -ge "$TELEGRAM_TS" ]]; then
-        "$SCRIPT_DIR/send_discord" -a "$AGENT_NAME" "$MESSAGE"
-    else
-        "$SCRIPT_DIR/send_tg" "$MESSAGE"
-    fi
-elif [[ -n "$DISCORD_CHANNEL" ]]; then
-    "$SCRIPT_DIR/send_discord" -a "$AGENT_NAME" "$MESSAGE"
-else
-    "$SCRIPT_DIR/send_tg" "$MESSAGE"
+DISCORD_CHANNEL="$(cat "$DISCORD_ACTIVE_FILE")"
+if [[ -z "$DISCORD_CHANNEL" ]]; then
+    echo "send_msg: active Discord channel is empty" >&2
+    exit 1
 fi
+
+"$SCRIPT_DIR/send_discord" -a "$AGENT_NAME" "$MESSAGE"

@@ -13,7 +13,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
 from src.agent import AgentRunner
-from src.channels import DiscordBot, TelegramBot
+from src.channels import DiscordBot
 from src.config import load_config
 from src.memory import MemoryManager
 from src.snapshot import read_snapshot, write_snapshot
@@ -23,7 +23,6 @@ log = logging.getLogger(__name__)
 
 def make_api_app(
     agent: AgentRunner,
-    bot: "TelegramBot | None" = None,
     discord_bot: "DiscordBot | None" = None,
 ) -> web.Application:
     """Create the aiohttp app for the HTTP API."""
@@ -76,13 +75,6 @@ def make_api_app(
         agent_name = cfg.identity_dir.name if cfg.identity_dir else "hollow"
 
         bots: dict[str, bool] = {}
-        if bot is not None:
-            try:
-                bots["telegram"] = bool(
-                    bot.app.updater and bot.app.updater.running
-                )
-            except Exception:
-                bots["telegram"] = False
         if discord_bot is not None:
             try:
                 bots["discord"] = bool(
@@ -180,8 +172,6 @@ def make_api_app(
         managers = []
         if discord_bot is not None:
             managers.append(discord_bot._bg_tasks)
-        if bot is not None:
-            managers.append(bot._bg_tasks)
 
         for mgr in managers:
             for task_id, record in list(mgr._tasks.items()):
@@ -242,7 +232,6 @@ def load_crons(memory_dir: Path) -> list[dict]:
 
 def setup_scheduler(
     agent: AgentRunner,
-    bot: TelegramBot | None,
     crons: list[dict],
     default_tz: str,
     discord_bot: DiscordBot | None = None,
@@ -266,7 +255,6 @@ def setup_scheduler(
         prompt = job_def.get("prompt", "")
         chat_id = job_def.get("chat_id", f"cron_{name}")
         is_main_session = job_def.get("is_main_session", False)
-        notify_telegram = job_def.get("notify_telegram", False)
         notify_discord = job_def.get("notify_discord", False)
         # Optional: post to a named Discord channel (e.g. "morning-brief")
         discord_channel_name = job_def.get("discord_channel_name", "")
@@ -291,24 +279,17 @@ def setup_scheduler(
             _prompt=prompt,
             _chat_id=chat_id,
             _is_main=is_main_session,
-            _notify=notify_telegram,
             _notify_discord=notify_discord,
             _discord_channel_name=discord_channel_name,
         ):
             log.info("Cron job '%s' firing", _name)
             try:
                 _aname = agent.config.identity_dir.name if agent.config.identity_dir else "hollow"
-                tg_active_file = Path(f"/tmp/hollow_active_chat_{_aname}")
                 discord_channel_file = Path(f"/tmp/hollow_active_discord_{_aname}")
                 discord_ts_file = Path(f"/tmp/hollow_active_discord_ts_{_aname}")
 
-                saved_tg_chat_id = None
                 saved_discord_channel = None
                 saved_discord_ts = None
-
-                if not _notify and tg_active_file.exists():
-                    saved_tg_chat_id = tg_active_file.read_text()
-                    tg_active_file.unlink()
 
                 # If this cron delivers to a specific Discord channel, suppress
                 # send_msg from routing interim messages to the active #tarn channel.
@@ -321,7 +302,7 @@ def setup_scheduler(
                         discord_ts_file.unlink()
 
                 # Build reply task without wait_for — task is never cancelled on timeout.
-                # Matches the discord/telegram channel pattern: wait up to 900s, then
+                # Matches the discord channel pattern: wait up to 900s, then
                 # hand off to BackgroundTaskManager for delivery when it finishes.
                 reply_task = asyncio.create_task(
                     agent.reply(
@@ -336,8 +317,6 @@ def setup_scheduler(
                     if not result:
                         return
                     log.info("Cron job '%s' delivering (%d chars)", _name, len(result))
-                    if _notify and bot and agent.config.heartbeat_chat_id:
-                        await bot.send_message(agent.config.heartbeat_chat_id, result)
                     if discord_bot and discord_bot._client and (
                         _notify_discord or _discord_channel_name
                     ):
@@ -353,17 +332,12 @@ def setup_scheduler(
                                     "Cron '%s': Discord channel '#%s' not found on any guild",
                                     _name, _discord_channel_name,
                                 )
-                        elif _notify_discord and agent.config.heartbeat_chat_id:
-                            await discord_bot.send_message(
-                                agent.config.heartbeat_chat_id, result
-                            )
+
 
                 try:
                     finished, _ = await asyncio.wait({reply_task}, timeout=900)
                 finally:
                     # Restore active-channel markers regardless of outcome
-                    if saved_tg_chat_id is not None:
-                        tg_active_file.write_text(saved_tg_chat_id)
                     if saved_discord_channel is not None:
                         discord_channel_file.write_text(saved_discord_channel)
                     if saved_discord_ts is not None:
@@ -378,11 +352,7 @@ def setup_scheduler(
                     await _deliver_cron(response)
                 else:
                     # Still running past 900s — hand off to BackgroundTaskManager.
-                    _bg = (
-                        discord_bot._bg_tasks if discord_bot is not None
-                        else bot._bg_tasks if bot is not None
-                        else None
-                    )
+                    _bg = discord_bot._bg_tasks if discord_bot is not None else None
                     if _bg is not None:
                         log.info(
                             "Cron job '%s' still running after 900s — handing off to BackgroundTaskManager",
@@ -415,12 +385,9 @@ def setup_scheduler(
     return scheduler
 
 
-def check_setup(config, require_telegram: bool = True) -> list[str]:
+def check_setup(config) -> list[str]:
     """Verify required files and config. Returns list of issues."""
     issues = []
-
-    if require_telegram and not config.telegram_bot_token:
-        issues.append("TELEGRAM_BOT_TOKEN not set")
 
     required_files = ["soul.md", "identity.md"]
     for f in required_files:
@@ -458,7 +425,7 @@ async def _channel_already_responded(agent, chat_id: str, elapsed_seconds: float
     return False
 
 
-async def _recover_pending_tasks(config, agent, discord_bot, bot) -> None:
+async def _recover_pending_tasks(config, agent, discord_bot) -> None:
     """Re-run any tasks that were in-flight when the process last died.
 
     Reads the pending_tasks SQLite table from each channel's BackgroundTaskManager,
@@ -471,8 +438,6 @@ async def _recover_pending_tasks(config, agent, discord_bot, bot) -> None:
     managers: list[BackgroundTaskManager] = []
     if discord_bot is not None:
         managers.append(discord_bot._bg_tasks)
-    if bot is not None:
-        managers.append(bot._bg_tasks)
 
     for mgr in managers:
         pending = await mgr.load_pending()
@@ -502,12 +467,6 @@ async def _recover_pending_tasks(config, agent, discord_bot, bot) -> None:
                             log.warning("Recovery: Discord channel %s not found", _cid)
                     except Exception:
                         log.exception("Recovery: failed to deliver to Discord channel %s", _cid)
-                elif _ct == "telegram" and bot is not None:
-                    try:
-                        for chunk_start in range(0, len(result), 4096):
-                            await bot.send_message(int(_cid), result[chunk_start : chunk_start + 4096])
-                    except Exception:
-                        log.exception("Recovery: failed to deliver to Telegram chat %s", _cid)
 
             async def _error_recovery(exc: Exception, _ct=_channel_type, _cid=_channel_id) -> None:
                 msg = f"⚠️ Recovered task failed: {exc}"
@@ -518,11 +477,6 @@ async def _recover_pending_tasks(config, agent, discord_bot, bot) -> None:
                             await channel.send(msg)
                     except Exception:
                         pass
-                elif _ct == "telegram" and bot is not None:
-                    try:
-                        await bot.send_message(int(_cid), msg)
-                    except Exception:
-                        pass
 
             # Post a recovery notice before re-running the task
             notice = "⚠️ I restarted while working on your request. Picking up where I left off..."
@@ -531,8 +485,6 @@ async def _recover_pending_tasks(config, agent, discord_bot, bot) -> None:
                     channel = discord_bot._client and discord_bot._client.get_channel(int(_channel_id))
                     if channel is not None:
                         await channel.send(notice)
-                elif _channel_type == "telegram" and bot is not None:
-                    await bot.send_message(int(_channel_id), notice)
             except Exception:
                 log.exception("Recovery: failed to send notice to %s/%s", _channel_type, _channel_id)
 
@@ -544,7 +496,7 @@ async def _recover_pending_tasks(config, agent, discord_bot, bot) -> None:
                 agent.reply(
                     message=_original_message,
                     chat_id=_channel_id,
-                    is_main_session=_channel_type == "telegram",
+                    is_main_session=False,
                 )
             )
             mgr.register(
@@ -629,7 +581,7 @@ def _format_snapshot_context(snapshot: dict | None) -> str:
     )
 
 
-async def _send_startup_notification(config, agent, bot, discord_bot) -> None:
+async def _send_startup_notification(config, agent, discord_bot) -> None:
     """On restart: review recent context per-channel and proactively continue work.
 
     Phase 2: injects last 15 conversation turns from SQLite as the primary
@@ -798,25 +750,8 @@ async def _send_startup_notification(config, agent, bot, discord_bot) -> None:
                 origin_channel_id = None
 
     if not origin_channel_id:
-        # Watchdog or unexpected crash — broadcast to Telegram + all tarn channels
+        # Watchdog or unexpected crash — broadcast to all tarn Discord channels
 
-        # ── Telegram ──────────────────────────────────────────────────────────
-        if bot and config.heartbeat_chat_id:
-            tg_chat_id = str(config.heartbeat_chat_id)
-            try:
-                await bot.send_message(config.heartbeat_chat_id, ping)
-            except Exception:
-                log.exception("Failed to send Telegram startup ping")
-
-            async def _tg_send(text: str) -> None:
-                try:
-                    await bot.send_message(config.heartbeat_chat_id, text)
-                except Exception:
-                    log.exception("Failed to deliver Telegram startup response")
-
-            await _do_channel_review(tg_chat_id, _tg_send)
-
-        # ── Discord — all tarn channels ────────────────────────────────────────
         if discord_bot and discord_bot._client:
             for discord_chat_id, tarn_channel in discord_bot.get_tarn_chat_ids():
                 try:
@@ -834,7 +769,7 @@ async def _send_startup_notification(config, agent, bot, discord_bot) -> None:
 
 
 async def run(args: argparse.Namespace = None):
-    """Main async entry point — HTTP API + Telegram bot + APScheduler."""
+    """Main async entry point — HTTP API + Discord bot + APScheduler."""
     # Resolve the agent-specific .env path early so load_config() can ingest
     # it before constructing the Config object (avoids post-hoc field patching).
     env_path = None
@@ -857,12 +792,11 @@ async def run(args: argparse.Namespace = None):
     print(f"  Port:     {config.api_port}")
     print()
 
-    issues = check_setup(config, require_telegram=bool(config.telegram_bot_token))
+    issues = check_setup(config)
     if issues:
         print(f"{len(issues)} issue(s):")
         for issue in issues:
             print(f"  - {issue}")
-        # Don't exit — allow running without telegram for testing
         if any("Missing" in i for i in issues):
             print("\nWarning: some identity files missing. Context will be incomplete.")
 
@@ -874,11 +808,6 @@ async def run(args: argparse.Namespace = None):
     agent = AgentRunner(config, memory)
     await agent.initialize()
 
-    # Initialize Telegram bot (if token available)
-    bot = None
-    if config.telegram_bot_token:
-        bot = TelegramBot(config, agent)
-
     # Initialize Discord bot (if token available)
     discord_bot = None
     if config.discord_bot_token:
@@ -886,10 +815,10 @@ async def run(args: argparse.Namespace = None):
 
     # Load and set up cron scheduler
     crons = load_crons(config.memory_dir)
-    scheduler = setup_scheduler(agent, bot, crons, config.user_timezone, discord_bot=discord_bot)
+    scheduler = setup_scheduler(agent, crons, config.user_timezone, discord_bot=discord_bot)
 
     # Set up HTTP API
-    api_app = make_api_app(agent, bot=bot, discord_bot=discord_bot)
+    api_app = make_api_app(agent, discord_bot=discord_bot)
     # Store scheduler reference so /snapshot handler can read cron state
     api_app["scheduler"] = scheduler
     api_runner = web.AppRunner(api_app)
@@ -931,10 +860,6 @@ async def run(args: argparse.Namespace = None):
     discord_task = None
     try:
         # Start services
-        if bot:
-            await bot.start()
-            log.info("Telegram bot started")
-
         if discord_bot:
             # discord.py's start() runs until close() is called — run as background task
             discord_task = asyncio.create_task(discord_bot.start(token=config.discord_bot_token))
@@ -947,7 +872,7 @@ async def run(args: argparse.Namespace = None):
         # Runs unconditionally (independent of startup_notification) so long-running
         # tasks are always recovered even on agents with STARTUP_NOTIFICATION=false.
         asyncio.create_task(
-            _recover_pending_tasks(config, agent, discord_bot, bot)
+            _recover_pending_tasks(config, agent, discord_bot)
         )
 
         # Send startup notification and proactively pick up where we left off.
@@ -956,7 +881,7 @@ async def run(args: argparse.Namespace = None):
         # channel, and should not receive unsolicited restart announcements).
         if config.startup_notification:
             asyncio.create_task(
-                _send_startup_notification(config, agent, bot, discord_bot)
+                _send_startup_notification(config, agent, discord_bot)
             )
 
         print("Hollow is running. Press Ctrl+C to stop.")
@@ -973,9 +898,6 @@ async def run(args: argparse.Namespace = None):
                     await discord_task
                 except (asyncio.CancelledError, Exception):
                     pass
-        if bot:
-            await bot._bg_tasks.shutdown()
-            await bot.stop()
         await api_runner.cleanup()
         await agent.history.close()
         await memory.close()
@@ -983,7 +905,6 @@ async def run(args: argparse.Namespace = None):
         # messages after a restart.
         _aname = config.identity_dir.name if config.identity_dir else "hollow"
         for _tmp_file in (
-            Path(f"/tmp/hollow_active_chat_{_aname}"),
             Path(f"/tmp/hollow_active_discord_{_aname}"),
             Path(f"/tmp/hollow_active_discord_ts_{_aname}"),
         ):

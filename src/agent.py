@@ -389,33 +389,6 @@ class AgentRunner:
                 reply_text = "Sorry, I encountered an error processing your message."
                 is_error_response = True
 
-                # Fire-and-forget operator alert via Telegram
-                async def _send_operator_alert(
-                    _token=self.config.telegram_bot_token,
-                    _chat_id=self.config.heartbeat_chat_id,
-                    _exc_type=type(e).__name__,
-                    _user_chat_id=chat_id,
-                    _user_msg=message,
-                ):
-                    if not _token or not _chat_id:
-                        return
-                    truncated = _user_msg[:200] + ("..." if len(_user_msg) > 200 else "")
-                    alert = (
-                        f"[AGENT ERROR] {_exc_type}\n"
-                        f"chat_id: {_user_chat_id}\n"
-                        f"message: {truncated}"
-                    )
-                    try:
-                        import httpx
-                        async with httpx.AsyncClient(timeout=10) as client:
-                            await client.post(
-                                f"https://api.telegram.org/bot{_token}/sendMessage",
-                                json={"chat_id": _chat_id, "text": alert},
-                            )
-                    except Exception:
-                        log.debug("Operator alert send failed (non-fatal)", exc_info=True)
-
-                asyncio.create_task(_send_operator_alert())
 
         # 6. Persist assistant response (skip if it's an error fallback string)
         if not is_error_response:

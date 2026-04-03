@@ -1,0 +1,344 @@
+#!/home/tchism/git/hollow/.venv/bin/python3
+"""
+bot-health-watchdog — Periodic check (every 15 min) that Tarn's bots are
+gateway-connected, not just HTTP-alive.
+
+Detects the "deaf bot" failure mode: HTTP server responds OK but the Discord
+gateway connection has silently dropped.
+
+Failure modes handled:
+  1. Bot deaf      — HTTP healthy but bots[name]=false  → alert + restart
+  2. Tarn down     — HTTP connection refused / timeout  → alert only
+                     (the 5-min watchdog cron already handles full restarts)
+
+Alerts:
+  - Discord: send_discord_channel script posting to #tarn channel
+
+Usage:
+    # Run interactively (loops forever, Ctrl-C to stop):
+    /home/tchism/git/hollow/bin/bot-health-watchdog
+
+    # Run as a background daemon (redirect output; script logs internally too):
+    nohup /home/tchism/git/hollow/bin/bot-health-watchdog >> /home/tchism/git/hollow/data/bot-health-watchdog.log 2>&1 &
+
+    # Or let systemd / a process supervisor manage it.
+
+State file: /tmp/hollow-bot-health-watchdog.json
+Log file:   /home/tchism/git/hollow/data/bot-health-watchdog.log
+
+NOTE: Do NOT start this directly — Tyler needs to review first.
+"""
+
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+import urllib.request
+import urllib.error
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Optional
+
+# ── Config ────────────────────────────────────────────────────────────────────
+
+HOLLOW_ROOT    = Path(__file__).resolve().parent.parent
+TARN_ENV       = HOLLOW_ROOT / "agents" / "tarn" / ".env"
+LOG_FILE       = HOLLOW_ROOT / "data" / "bot-health-watchdog.log"
+STATE_FILE     = Path("/tmp/hollow-bot-health-watchdog.json")
+RESTART_SCRIPT = HOLLOW_ROOT / "bin" / "restart-tarn"
+
+TARN_PORT       = 18800
+HEALTH_URL      = f"http://127.0.0.1:{TARN_PORT}/health"
+CHECK_INTERVAL  = 900   # seconds between checks (15 minutes)
+HEALTH_TIMEOUT  = 10    # seconds to wait for /health response
+RESTART_WAIT    = 25    # seconds to wait after restart before re-checking bots
+COOLDOWN_SEC    = 840   # don't re-alert the same issue within ~14 min
+                        # (slightly under CHECK_INTERVAL so back-to-back failures alert)
+
+
+# ── Logging ───────────────────────────────────────────────────────────────────
+
+# Log to both stdout (captured by the shell redirect) and the log file.
+# The log file is opened in append mode on each write so that log rotation
+# doesn't require a restart.
+
+def ts() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def log(msg: str) -> None:
+    line = f"[{ts()}] {msg}"
+    print(line, flush=True)
+    try:
+        with open(LOG_FILE, "a") as f:
+            f.write(line + "\n")
+    except Exception:
+        pass  # stdout is the fallback
+
+# ── .env helpers ──────────────────────────────────────────────────────────────
+
+def load_env(path: Path) -> dict:
+    env: dict = {}
+    if not path.exists():
+        return env
+    for line in path.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        m = re.match(r'^([A-Z_][A-Z0-9_]*)=(.*)$', line)
+        if m:
+            env[m.group(1)] = m.group(2).strip('"').strip("'")
+    return env
+
+
+# ── Alert helpers ─────────────────────────────────────────────────────────────
+
+def send_discord_alert(text: str) -> bool:
+    """Post to #tarn channel via send_discord_channel script."""
+    script = HOLLOW_ROOT / "bin" / "send_discord_channel"
+    if not script.exists():
+        log("  send_discord_channel script not found — skipping Discord alert")
+        return False
+    try:
+        result = subprocess.run(
+            [str(script), "tarn", text],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if result.returncode == 0:
+            return True
+        log(f"  send_discord_channel failed (rc={result.returncode}): {result.stderr.strip()}")
+        return False
+    except Exception as e:
+        log(f"  send_discord_channel exception: {e}")
+        return False
+
+
+def alert(text: str) -> None:
+    """Send alert to Discord #tarn."""
+    ok = send_discord_alert(text)
+    log(f"  Discord alert {'sent' if ok else 'FAILED'}")
+
+# ── Health check ──────────────────────────────────────────────────────────────
+
+def ping_tarn() -> tuple[bool, str, dict]:
+    """
+    Returns (http_up, status_string, bots_dict).
+    bots_dict: {"telegram": True/False, "discord": True/False, ...}
+    """
+    req = urllib.request.Request(HEALTH_URL, method="GET")
+    try:
+        with urllib.request.urlopen(req, timeout=HEALTH_TIMEOUT) as resp:
+            body = json.load(resp)
+            status = body.get("status", "")
+            bots = body.get("bots", {})
+            if status in ("ok", "degraded"):
+                return True, status, bots
+            return False, f"unexpected status: {body}", {}
+    except urllib.error.URLError as e:
+        return False, f"connection refused/timeout: {e.reason}", {}
+    except Exception as e:
+        return False, str(e), {}
+
+# ── State / cooldown ──────────────────────────────────────────────────────────
+
+def load_state() -> dict:
+    if STATE_FILE.exists():
+        try:
+            return json.loads(STATE_FILE.read_text())
+        except Exception:
+            pass
+    return {}
+
+
+def save_state(state: dict) -> None:
+    try:
+        STATE_FILE.write_text(json.dumps(state, indent=2))
+    except Exception as e:
+        log(f"  WARNING: could not save state to {STATE_FILE}: {e}")
+
+
+def in_cooldown(state: dict, key: str) -> bool:
+    last = state.get(key, {}).get("last_alert_ts")
+    if not last:
+        return False
+    return (time.time() - last) < COOLDOWN_SEC
+
+
+def record_alert(state: dict, key: str) -> None:
+    state.setdefault(key, {})["last_alert_ts"] = time.time()
+
+# ── Restart ───────────────────────────────────────────────────────────────────
+
+def do_restart() -> bool:
+    """
+    Run restart-tarn and verify bots reconnect afterward.
+    Returns True if bots are healthy post-restart.
+    """
+    if not RESTART_SCRIPT.exists():
+        log(f"  restart-tarn not found at {RESTART_SCRIPT}")
+        return False
+
+    log(f"  Running restart-tarn...")
+    try:
+        result = subprocess.run(
+            ["bash", str(RESTART_SCRIPT)],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        log(f"  restart-tarn exited rc={result.returncode}")
+        if result.stdout:
+            for line in result.stdout.strip().splitlines():
+                log(f"    {line}")
+        if result.stderr:
+            for line in result.stderr.strip().splitlines():
+                log(f"    stderr: {line}")
+    except subprocess.TimeoutExpired:
+        log("  restart-tarn timed out after 60s")
+        return False
+    except Exception as e:
+        log(f"  restart-tarn exception: {e}")
+        return False
+
+    log(f"  Waiting {RESTART_WAIT}s for bots to reconnect...")
+    time.sleep(RESTART_WAIT)
+
+    http_up, status, bots = ping_tarn()
+    if not http_up:
+        log(f"  Tarn still not reachable after restart: {status}")
+        return False
+
+    deaf = [name for name, ok in bots.items() if not ok]
+    if deaf:
+        log(f"  Bots STILL deaf after restart: {', '.join(deaf)}")
+        return False
+
+    log(f"  All bots connected after restart. Status: {bots}")
+    return True
+
+# ── Main loop ─────────────────────────────────────────────────────────────────
+
+def run_check(state: dict) -> None:
+    """Execute one health check cycle and mutate state accordingly."""
+    log("--- bot-health check ---")
+    http_up, status, bots = ping_tarn()
+
+    if not http_up:
+        # Tarn is fully down — alert but don't restart (the 5-min watchdog
+        # cron handles full outage restarts to avoid race conditions).
+        log(f"  Tarn HTTP unreachable: {status}")
+        key = "tarn_down"
+        if not in_cooldown(state, key):
+            msg = (
+                f"[bot-health-watchdog] Tarn HTTP unreachable at {HEALTH_URL}\n"
+                f"Detail: {status}\n"
+                f"The 5-min watchdog cron will attempt a restart if needed.\n"
+                f"{ts()}"
+            )
+            alert(msg)
+            record_alert(state, key)
+        else:
+            log("  Tarn-down alert in cooldown — skipping")
+        save_state(state)
+        return
+
+    # HTTP is up — inspect bots dict
+    if not bots:
+        # No bot info exposed (shouldn't happen with current code, but be safe)
+        log(f"  HTTP up ({status}), no bots field in response — nothing to check")
+        state.pop("tarn_down", None)
+        save_state(state)
+        return
+
+    deaf = [name for name, ok in bots.items() if not ok]
+    healthy = [name for name, ok in bots.items() if ok]
+
+    if healthy:
+        log(f"  Bots healthy: {', '.join(healthy)}")
+    if deaf:
+        log(f"  Bots DEAF: {', '.join(deaf)}")
+    else:
+        log(f"  All bots connected — OK")
+        # Clear any prior down state
+        state.pop("tarn_down", None)
+        for name in bots:
+            state.pop(f"bot_deaf_{name}", None)
+        save_state(state)
+        return
+
+    # At least one bot is deaf — alert then restart
+    deaf_key = f"bot_deaf_{'_'.join(sorted(deaf))}"
+    if in_cooldown(state, deaf_key):
+        log(f"  Deaf-bot alert in cooldown — skipping re-alert/restart")
+        save_state(state)
+        return
+
+    # Alert first so Tyler is notified even if restart also fails
+    msg_pre = (
+        f"[bot-health-watchdog] Deaf bot(s) detected on Tarn:\n"
+        f"  Deaf:    {', '.join(deaf)}\n"
+        f"  Healthy: {', '.join(healthy) if healthy else 'none'}\n"
+        f"HTTP is up but gateway disconnected. Triggering restart...\n"
+        f"{ts()}"
+    )
+    alert(msg_pre)
+    record_alert(state, deaf_key)
+    save_state(state)
+
+    # Attempt restart
+    recovered = do_restart()
+
+    if recovered:
+        msg_post = (
+            f"[bot-health-watchdog] Restart successful — all bots reconnected.\n"
+            f"Previously deaf: {', '.join(deaf)}\n"
+            f"{ts()}"
+        )
+        log(f"  Restart resolved deaf bots: {deaf}")
+        alert(msg_post)
+        # Clear deaf state after successful recovery
+        state.pop(deaf_key, None)
+        save_state(state)
+    else:
+        msg_fail = (
+            f"[bot-health-watchdog] Restart did NOT resolve deaf bots.\n"
+            f"Still deaf after restart: check logs manually.\n"
+            f"Log: /tmp/tarn.log\n"
+            f"{ts()}"
+        )
+        log("  Restart did NOT resolve deaf bots — alerting")
+        alert(msg_fail)
+        save_state(state)
+
+
+def main() -> None:
+    log("=" * 60)
+    log("bot-health-watchdog starting")
+    log(f"  Health URL:     {HEALTH_URL}")
+    log(f"  Check interval: {CHECK_INTERVAL}s ({CHECK_INTERVAL // 60} min)")
+    log(f"  Restart script: {RESTART_SCRIPT}")
+    log(f"  Log file:       {LOG_FILE}")
+    log(f"  State file:     {STATE_FILE}")
+    log("=" * 60)
+
+    state = load_state()
+
+    # Run once immediately on startup, then loop
+    while True:
+        try:
+            run_check(state)
+        except Exception as e:
+            log(f"UNEXPECTED ERROR in run_check: {e}")
+            import traceback
+            log(traceback.format_exc())
+
+        log(f"Sleeping {CHECK_INTERVAL}s until next check...")
+        time.sleep(CHECK_INTERVAL)
+
+
+if __name__ == "__main__":
+    main()
