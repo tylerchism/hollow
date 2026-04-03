@@ -16,6 +16,7 @@ from src.agent import AgentRunner
 from src.channels import DiscordBot, TelegramBot
 from src.config import load_config
 from src.memory import MemoryManager
+from src.snapshot import read_snapshot, write_snapshot
 
 log = logging.getLogger(__name__)
 
@@ -166,10 +167,59 @@ def make_api_app(
         history_text = await discord_bot.get_channel_history(channel_name, limit=limit)
         return web.Response(text=history_text, content_type="text/plain")
 
+    async def handle_snapshot(request: web.Request) -> web.Response:
+        """POST /snapshot — synchronously write current state to SQLite.
+
+        Called by restart-agent before sending SIGTERM so the new process can
+        read a fresh snapshot and build a richer continuity message.
+        """
+        import time as _time
+
+        # Collect background tasks from whichever manager(s) exist
+        bg_tasks: list[dict] = []
+        managers = []
+        if discord_bot is not None:
+            managers.append(discord_bot._bg_tasks)
+        if bot is not None:
+            managers.append(bot._bg_tasks)
+
+        for mgr in managers:
+            for task_id, record in list(mgr._tasks.items()):
+                started_at = getattr(record, "started_at", None) or _time.time()
+                bg_tasks.append({
+                    "task_id": task_id,
+                    "channel_type": record.channel_type,
+                    "channel_id": record.channel_id,
+                    "original_message": record.original_message,
+                    "started_at": started_at,
+                })
+
+        # Collect cron job state from the scheduler stored on the app
+        cron_jobs: list[dict] = []
+        _scheduler = request.app.get("scheduler")
+        if _scheduler is not None:
+            try:
+                for job in _scheduler.get_jobs():
+                    next_run = job.next_run_time
+                    cron_jobs.append({
+                        "name": job.id,
+                        "next_run_time": next_run.isoformat() if next_run else None,
+                    })
+            except Exception:
+                log.exception("handle_snapshot: failed to collect cron state")
+
+        write_snapshot(
+            data_dir=agent.config.data_dir,
+            bg_tasks=bg_tasks,
+            cron_jobs=cron_jobs,
+        )
+        return web.json_response({"status": "ok", "bg_tasks": len(bg_tasks), "cron_jobs": len(cron_jobs)})
+
     app = web.Application()
     app.router.add_get("/health", handle_health)
     app.router.add_post("/ask", handle_ask)
     app.router.add_get("/history/{channel_name}", handle_history)
+    app.router.add_post("/snapshot", handle_snapshot)
     return app
 
 
@@ -509,8 +559,87 @@ async def _recover_pending_tasks(config, agent, discord_bot, bot) -> None:
             await mgr._delete_pending(record.task_id)
 
 
+async def _load_recent_conversation(agent, chat_id: str, n_turns: int = 15) -> str:
+    """Load the last n_turns from the SQLite conversation history for a channel.
+
+    Returns a formatted string suitable for injection into the startup prompt,
+    or an empty string if no history is available.
+
+    A "turn" is a user+assistant pair; we fetch up to 2*n_turns messages.
+    """
+    try:
+        limit = n_turns * 2
+        cursor = await agent.history._db.execute(
+            "SELECT role, content FROM chat_sessions "
+            "WHERE chat_id = ? AND session_key = '' "
+            "ORDER BY created_at DESC LIMIT ?",
+            (chat_id, limit),
+        )
+        rows = await cursor.fetchall()
+        if not rows:
+            return ""
+        # Reverse to get chronological order (oldest first)
+        rows = list(reversed(rows))
+        parts = []
+        for role, content in rows:
+            display = "Tyler" if role == "user" else "Tarn"
+            # Truncate very long messages to keep the prompt manageable
+            snippet = content[:800] + "..." if len(content) > 800 else content
+            parts.append(f"{display}: {snippet}")
+        return "\n".join(parts)
+    except Exception:
+        log.debug("_load_recent_conversation: failed for chat_id=%s", chat_id, exc_info=True)
+        return ""
+
+
+def _format_snapshot_context(snapshot: dict | None) -> str:
+    """Format snapshot data into a compact context string for the startup prompt."""
+    if snapshot is None:
+        return ""
+
+    import time as _time
+
+    parts: list[str] = []
+    age_secs = _time.time() - snapshot.get("saved_at", 0)
+
+    bg_tasks = snapshot.get("bg_tasks", [])
+    if bg_tasks:
+        task_lines = []
+        for t in bg_tasks:
+            started = t.get("started_at", 0)
+            elapsed_min = int((_time.time() - started) / 60) if started else 0
+            msg = t.get("original_message", "")[:120]
+            task_lines.append(
+                f"  - [{t.get('channel_type','?')}/{t.get('channel_id','?')}] "
+                f"started {elapsed_min}m ago — {msg!r}"
+            )
+        parts.append("Background tasks that were in-flight at shutdown:\n" + "\n".join(task_lines))
+
+    cron_jobs = snapshot.get("cron_jobs", [])
+    if cron_jobs:
+        cron_lines = [f"  - {j.get('name','?')} (next: {j.get('next_run_time') or 'unknown'})" for j in cron_jobs]
+        parts.append("Cron jobs at shutdown:\n" + "\n".join(cron_lines))
+
+    if not parts:
+        return ""
+
+    return (
+        f"[Snapshot from {int(age_secs)}s before restart]\n"
+        + "\n".join(parts)
+    )
+
+
 async def _send_startup_notification(config, agent, bot, discord_bot) -> None:
-    """On restart: review recent context per-channel and proactively continue work."""
+    """On restart: review recent context per-channel and proactively continue work.
+
+    Phase 2: injects last 15 conversation turns from SQLite as the primary
+    handoff context.  MC board is NOT consulted.
+
+    Phase 3: reads /tmp/<agent>_restart_origin_channel to determine routing:
+      - If origin channel is set (agent triggered the restart): send full context
+        review ONLY to that channel.  All others get nothing.
+      - If not set (watchdog crash): send to all tarn channels + Telegram.
+    """
     import os
 
     # Maintenance restarts are quiet — skip full re-orientation to avoid noise.
@@ -522,9 +651,29 @@ async def _send_startup_notification(config, agent, bot, discord_bot) -> None:
     from src.agent import NATIVE_TOOLS
     STARTUP_ALLOWED_TOOLS = [t for t in NATIVE_TOOLS if t != "Bash"]
 
+    # ── Phase 1: read pre-kill snapshot ───────────────────────────────────────
+    snapshot = read_snapshot(config.data_dir)
+    snapshot_context = _format_snapshot_context(snapshot)
+    if snapshot_context:
+        log.info("Startup: loaded pre-kill snapshot (%d bg tasks, %d cron jobs)",
+                 len(snapshot.get("bg_tasks", [])), len(snapshot.get("cron_jobs", [])))
+    else:
+        log.info("Startup: no usable snapshot found")
+
+    # ── Phase 3: origin-channel routing ───────────────────────────────────────
+    _agent_name = config.identity_dir.name if config.identity_dir else "hollow"
+    _origin_channel_file = Path(f"/tmp/{_agent_name}_restart_origin_channel")
+    origin_channel_id: str | None = None
+    try:
+        if _origin_channel_file.exists():
+            origin_channel_id = _origin_channel_file.read_text().strip() or None
+            _origin_channel_file.unlink(missing_ok=True)
+            if origin_channel_id:
+                log.info("Startup: origin-channel routing to channel %s", origin_channel_id)
+    except Exception:
+        log.debug("Startup: failed to read origin-channel file", exc_info=True)
+
     # Wait for Discord to fully connect before sending.
-    # If Discord is enabled, wait for on_ready to fire (up to 30s); otherwise
-    # fall back to a short sleep so Telegram still gets the notification promptly.
     if discord_bot:
         try:
             await asyncio.wait_for(discord_bot._ready_event.wait(), timeout=30)
@@ -535,7 +684,6 @@ async def _send_startup_notification(config, agent, bot, discord_bot) -> None:
         await asyncio.sleep(8)
 
     # Maintenance restart: post a minimal one-liner to Discord #tarn only.
-    # No Telegram, no context re-evaluation.
     if is_maintenance:
         log.info("Maintenance restart detected — sending minimal notification to Discord only")
         if discord_bot and discord_bot._client:
@@ -543,7 +691,7 @@ async def _send_startup_notification(config, agent, bot, discord_bot) -> None:
                 try:
                     await discord_bot._send_chunked(
                         tarn_channel,
-                        "🔧 Maintenance restart complete. Crons reloaded.",
+                        "Maintenance restart complete. Crons reloaded.",
                     )
                 except Exception:
                     log.exception("Failed to send maintenance restart notification to Discord channel %s", discord_chat_id)
@@ -551,113 +699,138 @@ async def _send_startup_notification(config, agent, bot, discord_bot) -> None:
 
     ping = "I'm back — reviewing context and picking up where we left off..."
 
-    startup_prompt = (
-        "I just restarted. Review our recent conversation history and the current Mission Control "
-        "task state to understand what we were working on. Then:\n"
-        "1. Send a brief message (1-3 sentences) summarizing where things stand\n"
-        "2. If there was active work in progress, continue it — don't wait to be re-prompted\n"
-        "3. If nothing was actively in progress, just confirm you're up and note any pending "
-        "decisions or blocked tasks that need attention\n\n"
-        "Be proactive. Tyler should not have to re-prompt you to continue.\n\n"
-        "CRITICAL: Do NOT run restart-tarn or any self-restart commands during this startup "
-        "sequence. You literally just restarted — calling restart-tarn now would kill this "
-        "process and create an infinite restart loop. If the previous conversation was about "
-        "restart issues, just summarize the status — do not attempt to fix it by restarting again."
-    )
+    def _build_startup_prompt(recent_history: str, bg_context: str) -> str:
+        """Build the startup prompt with conversation history + snapshot, no MC board."""
+        parts = [
+            "I just restarted. Below is the recent conversation history for this channel "
+            "and any background tasks that were in-flight when I shut down. "
+            "Use this to pick up exactly where we left off — conversational thread first, "
+            "background tasks second.",
+            "",
+        ]
 
-    # ── Telegram ──────────────────────────────────────────────────────────────
-    if bot and config.heartbeat_chat_id:
-        tg_chat_id = str(config.heartbeat_chat_id)
-        try:
-            await bot.send_message(config.heartbeat_chat_id, ping)
-        except Exception:
-            log.exception("Failed to send Telegram startup ping")
+        if recent_history:
+            parts.append("Recent conversation in this channel (oldest first):")
+            parts.append(recent_history)
+            parts.append("")
+
+        if bg_context:
+            parts.append(bg_context)
+            parts.append("")
+
+        parts.extend([
+            "Based on the above:",
+            "1. Send a brief message (1-3 sentences) picking up the conversational thread "
+            "and naming the next concrete step",
+            "2. If there was active background work, mention its status",
+            "3. If nothing was actively in progress, just confirm you're up",
+            "",
+            "Be specific and terse. Tyler should not have to re-prompt you.",
+            "",
+            "CRITICAL: Do NOT run restart-agent or any self-restart commands during this "
+            "startup sequence. You literally just restarted — calling restart-agent now would "
+            "create an infinite restart loop. If the previous conversation was about restart "
+            "issues, summarize the status only.",
+        ])
+        return "\n".join(parts)
+
+    async def _do_channel_review(chat_id: str, send_fn) -> None:
+        """Run the context review for a single channel and deliver the result."""
+        # If there's already a recent assistant reply, skip to avoid doubling.
+        if await _channel_already_responded(agent, chat_id, elapsed_seconds=300):
+            log.info("Startup: channel %s already has a recent reply — skipping", chat_id)
+            return
+
+        recent_history = await _load_recent_conversation(agent, chat_id)
+        prompt = _build_startup_prompt(recent_history, snapshot_context)
+
         try:
             response = await asyncio.wait_for(
                 agent.reply(
-                    message=startup_prompt,
-                    chat_id=tg_chat_id,
+                    message=prompt,
+                    chat_id=chat_id,
                     is_main_session=True,
                     allowed_tools=STARTUP_ALLOWED_TOOLS,
                 ),
                 timeout=120,
             )
             if response and response.strip():
-                await bot.send_message(config.heartbeat_chat_id, response)
+                await send_fn(response)
         except asyncio.TimeoutError:
-            log.warning("Telegram startup context review timed out after 120s")
-            try:
-                await bot.send_message(
-                    config.heartbeat_chat_id,
-                    "I'm back — ready to continue. What are we working on?",
-                )
-            except Exception:
-                pass
+            log.warning("Startup context review timed out after 120s for channel %s", chat_id)
+            await send_fn("I'm back — ready to continue. What are we working on?")
         except Exception:
-            log.exception("Failed to run Telegram startup context review")
+            log.exception("Failed to run startup context review for channel %s", chat_id)
+            await send_fn("I'm back — ready to continue. What are we working on?")
+
+    # ── Origin-channel routing decision ───────────────────────────────────────
+    # If origin_channel_id is set: the agent itself triggered the restart from a
+    # specific Discord channel.  Send the full review ONLY there.  Skip Telegram
+    # and all other channels.
+    #
+    # If origin_channel_id is NOT set: watchdog or unexpected crash.  Send to
+    # Telegram (if configured) AND all tarn Discord channels.
+
+    if origin_channel_id:
+        # Targeted restart from a known channel — send only there
+        log.info("Startup: targeted restart — sending context review to origin channel %s only", origin_channel_id)
+        if discord_bot and discord_bot._client:
             try:
-                await bot.send_message(
-                    config.heartbeat_chat_id,
-                    "I'm back — ready to continue. What are we working on?",
-                )
+                channel = discord_bot._client.get_channel(int(origin_channel_id))
+                if channel is None:
+                    channel = await discord_bot._client.fetch_channel(int(origin_channel_id))
             except Exception:
-                pass
+                channel = None
 
-    # ── Discord ───────────────────────────────────────────────────────────────
-    # Track the timestamp when this startup notification began. Any channel
-    # that already has an assistant response AFTER this timestamp has already
-    # been handled (e.g. the user messaged manually before the startup loop
-    # got to that guild) — skip the AI review to avoid a double-message.
-    startup_began_at = asyncio.get_event_loop().time()
-
-    if discord_bot and discord_bot._client:
-        for discord_chat_id, tarn_channel in discord_bot.get_tarn_chat_ids():
-            try:
-                await discord_bot._send_chunked(tarn_channel, ping)
-            except Exception:
-                log.exception("Failed to send Discord startup ping to channel %s", discord_chat_id)
-
-            # If there's already a recent assistant reply in this channel's session
-            # (posted after startup began), the user manually re-engaged and Tarn
-            # already responded — skip the automated context review to avoid doubling.
-            elapsed = asyncio.get_event_loop().time() - startup_began_at
-            if await _channel_already_responded(agent, discord_chat_id, elapsed):
-                log.info(
-                    "Startup: Discord channel %s already has a recent reply — skipping duplicate context review",
-                    discord_chat_id,
-                )
-                continue
-
-            try:
-                response = await asyncio.wait_for(
-                    agent.reply(
-                        message=startup_prompt,
-                        chat_id=discord_chat_id,
-                        is_main_session=True,
-                        allowed_tools=STARTUP_ALLOWED_TOOLS,
-                    ),
-                    timeout=120,
-                )
-                if response and response.strip():
-                    await discord_bot._send_chunked(tarn_channel, response)
-            except asyncio.TimeoutError:
-                log.warning("Discord startup context review timed out after 120s for channel %s", discord_chat_id)
+            if channel is not None:
                 try:
-                    await discord_bot._send_chunked(
-                        tarn_channel,
-                        "I'm back — ready to continue. What are we working on?",
-                    )
+                    await discord_bot._send_chunked(channel, ping)
                 except Exception:
-                    pass
+                    log.exception("Failed to send startup ping to origin channel %s", origin_channel_id)
+
+                async def _discord_origin_send(text: str) -> None:
+                    await discord_bot._send_chunked(channel, text)
+
+                await _do_channel_review(origin_channel_id, _discord_origin_send)
+            else:
+                log.warning("Startup: origin channel %s not found — falling back to all tarn channels", origin_channel_id)
+                # Fall through to broadcast below
+                origin_channel_id = None
+
+    if not origin_channel_id:
+        # Watchdog or unexpected crash — broadcast to Telegram + all tarn channels
+
+        # ── Telegram ──────────────────────────────────────────────────────────
+        if bot and config.heartbeat_chat_id:
+            tg_chat_id = str(config.heartbeat_chat_id)
+            try:
+                await bot.send_message(config.heartbeat_chat_id, ping)
             except Exception:
-                log.exception("Failed to run Discord startup context review for channel %s", discord_chat_id)
+                log.exception("Failed to send Telegram startup ping")
+
+            async def _tg_send(text: str) -> None:
                 try:
-                    await discord_bot._send_chunked(
-                        tarn_channel,
-                        "I'm back — ready to continue. What are we working on?",
-                    )
+                    await bot.send_message(config.heartbeat_chat_id, text)
                 except Exception:
-                    pass
+                    log.exception("Failed to deliver Telegram startup response")
+
+            await _do_channel_review(tg_chat_id, _tg_send)
+
+        # ── Discord — all tarn channels ────────────────────────────────────────
+        if discord_bot and discord_bot._client:
+            for discord_chat_id, tarn_channel in discord_bot.get_tarn_chat_ids():
+                try:
+                    await discord_bot._send_chunked(tarn_channel, ping)
+                except Exception:
+                    log.exception("Failed to send Discord startup ping to channel %s", discord_chat_id)
+
+                async def _discord_tarn_send(text: str, _ch=tarn_channel) -> None:
+                    try:
+                        await discord_bot._send_chunked(_ch, text)
+                    except Exception:
+                        log.exception("Failed to deliver Discord startup response to channel %s", discord_chat_id)
+
+                await _do_channel_review(discord_chat_id, _discord_tarn_send)
 
 
 async def run(args: argparse.Namespace = None):
@@ -717,6 +890,8 @@ async def run(args: argparse.Namespace = None):
 
     # Set up HTTP API
     api_app = make_api_app(agent, bot=bot, discord_bot=discord_bot)
+    # Store scheduler reference so /snapshot handler can read cron state
+    api_app["scheduler"] = scheduler
     api_runner = web.AppRunner(api_app)
     await api_runner.setup()
     _port_retries = 20

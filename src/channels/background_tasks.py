@@ -50,6 +50,7 @@ class _TaskRecord:
     task: asyncio.Task
     deliver_fn: Callable[[str], Awaitable[None]]
     error_fn: Callable[[Exception], Awaitable[None]]
+    started_at: float = field(default_factory=time.time)
     watchdog: asyncio.Task | None = field(default=None, repr=False)
 
 
@@ -145,6 +146,7 @@ class BackgroundTaskManager:
             task=task,
             deliver_fn=deliver_fn,
             error_fn=error_fn,
+            started_at=started_at,
             watchdog=watchdog,
         )
         self._tasks[task_id] = record

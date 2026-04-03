@@ -1,7 +1,14 @@
 #!/usr/bin/env bash
 # restart-agent — generic agent restart script.
 #
-# Usage: restart-agent NAME PORT LAUNCH_CMD...
+# Usage: restart-agent [--origin-channel CHANNEL_ID] NAME PORT LAUNCH_CMD...
+#
+#   --origin-channel CHANNEL_ID
+#               Optional Discord channel ID that triggered the restart.
+#               When set, written to /tmp/<NAME>_restart_origin_channel so
+#               the new process sends the startup context review only to
+#               that channel (origin-channel routing).
+#               Watchdog callers should NOT set this flag.
 #
 #   NAME        Agent name (for logging and pgrep pattern).
 #               Log file is derived as /tmp/<NAME>.log.
@@ -17,6 +24,13 @@
 
 set -euo pipefail
 
+# Parse optional --origin-channel flag
+ORIGIN_CHANNEL=""
+if [ "${1:-}" = "--origin-channel" ]; then
+  ORIGIN_CHANNEL="${2:?restart-agent: --origin-channel requires a CHANNEL_ID argument}"
+  shift 2
+fi
+
 NAME="${1:?restart-agent: NAME is required}"
 PORT="${2:?restart-agent: PORT is required}"
 shift 2
@@ -27,16 +41,48 @@ if [ ${#LAUNCH_CMD[@]} -eq 0 ]; then
   exit 1
 fi
 
-LOG_FILE="/tmp/${NAME}.log"
 HOLLOW_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+LOG_FILE="${HOLLOW_ROOT}/data/${NAME}.log"
+
+# ── Phase 1: pre-kill snapshot ───────────────────────────────────────────────
+# Call POST /snapshot on the running process so it can persist its current
+# background-task and cron state before we send SIGTERM.  2-second timeout,
+# fail-silent — a dead or slow agent should not block the restart.
+_AGENT_PORT="$PORT"
+echo "[restart-agent:$NAME] Requesting pre-kill snapshot from port $_AGENT_PORT..."
+curl -s -X POST "http://127.0.0.1:${_AGENT_PORT}/snapshot" \
+  --max-time 2 \
+  -H "Content-Type: application/json" \
+  >/dev/null 2>&1 || true
+
+# ── Phase 3: write origin-channel file ───────────────────────────────────────
+# If --origin-channel was supplied, write it to /tmp so the new process can
+# read it on startup and route the context review to the correct channel only.
+if [ -n "$ORIGIN_CHANNEL" ]; then
+  echo "[restart-agent:$NAME] Writing origin channel ($ORIGIN_CHANNEL) to /tmp/${NAME}_restart_origin_channel"
+  printf '%s' "$ORIGIN_CHANNEL" > "/tmp/${NAME}_restart_origin_channel"
+fi
 
 echo "[restart-agent:$NAME] Killing all old $NAME processes..."
 
 # Kill by port (process holding the socket)
 OLD_PIDS=$(lsof -ti:"$PORT" 2>/dev/null || true)
 # Kill any stale processes by identity-dir pattern — catches processes that
-# started but haven't bound to the port yet (root cause of pile-up restarts)
+# started but haven't bound to the port yet (root cause of pile-up restarts).
+# Exclude our own process tree ($$, $PPID) so we don't kill ourselves — the
+# launch_cmd arguments on our command line also match the pattern.
 PATTERN_PIDS=$(pgrep -f "identity-dir.*agents/$NAME" 2>/dev/null || true)
+# Filter out this script's own PID and parent PID to avoid self-kill
+_SELF_PIDS="$$ $PPID"
+FILTERED_PIDS=""
+for _p in $PATTERN_PIDS; do
+  _skip=0
+  for _s in $_SELF_PIDS; do
+    [ "$_p" = "$_s" ] && _skip=1 && break
+  done
+  [ "$_skip" -eq 0 ] && FILTERED_PIDS="$FILTERED_PIDS $_p"
+done
+PATTERN_PIDS="$FILTERED_PIDS"
 
 ALL_PIDS=$(echo "$OLD_PIDS $PATTERN_PIDS" | tr ' ' '\n' | sort -u | grep -v '^$' | tr '\n' ' ')
 
