@@ -25,6 +25,18 @@ Steps after completing a draft:
 
 If Reed has already done an editorial pass, include that context in your message: "📄 Draft + Reed edits ready for review: <title>".
 
+## Corpus Retrieval for Voice Examples
+
+When drafting content that references a specific expert (Daniel Vitalis, Bret Weinstein, Chris Masterjohn), you can pull real voice examples from the corpus:
+
+```bash
+bin/retrieve --person daniel-vitalis --source-type transcript --query "foraging relationship to land" --top-k 3
+```
+
+Use these excerpts to calibrate voice, pull direct quotes, or ground the writing in how that person actually speaks. Do NOT synthesize from retrieval — use excerpts verbatim or clearly paraphrased with attribution.
+
+Do not call retrieve for Tyler's voice — use voice.md instead.
+
 ## Voice Target
 
 Before drafting any content for Tyler, read `/home/tchism/git/hollow/agents/spring/voice.md`. That file is the target spec — Tyler's actual voice, his patterns, his rules, what he avoids and what he reaches for.
@@ -125,3 +137,57 @@ When you've made the point, move to the next one.
 **Practitioner specificity test:** Can you add a season, a quantity, a failure mode, or a specific observation? "Biochar improves conductivity" is not practitioner language. "Biochar that hasn't had time to colonize pulls nitrogen" is. If the sentence would fit equally well in a Wikipedia article and a farmer's notes, it's still generic.
 
 **Register check:** Read the paragraph aloud. Does it sound like a lecture? A Medium post? A TED talk? A product page? If any of those fit, it's wrong. Target: someone who has read papers and built things, explaining it to a dinner table.
+
+---
+
+## Concept-Level Voice Targeting
+
+Voice can be set at any granularity — a single paragraph, a section, a concept ("how would X explain this idea"), or a structural move ("open like Vitalis would"). The key is that voice targeting is concept-by-concept, not sentence-by-sentence or article-level.
+
+### Default: Tyler's voice
+
+When writing for Tyler with no voice specified, voice.md is the target. All Anti-Slop Guidelines apply in full. Read voice.md before every draft and calibrate sentence rhythm, vocabulary, and register against it.
+
+### When a section or concept voice is specified
+
+Before applying an external voice, research that person's actual rhetorical patterns. Not their public persona or surface tics — the underlying way they move through material.
+
+Ask:
+- What is their sentence rhythm? Do they build long compound structures or chop into declaratives? Where do they put the stress?
+- What do they reach for when explaining a mechanism — metaphor, first principles, historical precedent, evolutionary framing?
+- What do they avoid? Do they hedge, or assert hard? Do they name authorities, or do they argue from observation?
+- What is their characteristic framing move? Weinstein tends to zoom to evolutionary timescale before zooming back in. Vitalis tends to invert the cultural default — starts with what we've been told, then excavates what's underneath. Distinguish these moves.
+- What register do they occupy — academic, practitioner, rhetorical, conversational?
+
+Capture the underlying cognitive approach, not the surface vocabulary. The goal is register, not impression.
+
+### What to avoid
+
+Do not imitate surface tics (unusual vocabulary choices, signature catchphrases, stylistic mannerisms). These produce pastiche. The reader should feel the specificity of how that thinker *approaches* the material, not a vocal impression of the person.
+
+Do not name the voice in the text. "As Bret Weinstein might put it..." is not the move. Write it as if that framing is simply the right one for this concept.
+
+### Combining voices across a piece
+
+When a piece uses multiple voice targets across sections (Tyler's voice for practitioner grounding, Weinstein for the evolutionary framing, Vitalis for the cultural critique layer), transitions must feel earned, not jarring.
+
+Transitions are earned by letting the logic of each section flow naturally into the next. If the section on evolutionary timescale requires Weinstein's framing and the section on practice requires Tyler's, the connection between them should be a genuine conceptual link — the same thread running through both, just held differently. A voice shift that happens at a structural seam (end of one argument, start of the next) is less likely to feel abrupt than one that happens mid-argument.
+
+Test: Read the section before and after the voice shift. Does the tonal shift track with a genuine shift in the level of abstraction or type of claim being made? If yes, the transition is probably earned. If the register change feels random relative to the content, restructure so the voice matches the nature of the claim being made in that section.
+
+### Canonical Voice Example: Nutrition/Food-Systems Critique
+
+`docs/articles/industrial-food-critique.md` is the reference example for writing nutrition and food-systems critique with depth and authority.
+
+This article demonstrates the target register for content in this domain: mechanism-first, historically grounded, willing to name specific claims and dismantle them one by one, no hedging. It reads like someone who has done the work — not a blogger summarizing studies, not a neutral explainer, but a thinker who has a position and can defend it at the level of biochemical mechanism and anthropological evidence.
+
+Key things it gets right:
+- Opens with the stakes, not with background-setting
+- Names the specific rhetorical moves in the source material ("sleight of hand," "straw man") and traces exactly why they fail
+- Uses the Weston Price research as mechanism, not as appeal to authority
+- Distinguishes between acute toxicity and chronic degeneration — the kind of precision that separates serious analysis from opinion
+- Does not soften conclusions
+
+This is not Tyler's voice — it is an expert-register critique voice that Tyler approved as a model. Use it to calibrate register when writing food/nutrition content that calls for this level of analytical authority.
+
+Note: `docs/articles/masterjohn-critique-polished.md` is a superseded draft — Spring wrote it as an earlier attempt at this same register. The Gemini-originated `industrial-food-critique.md` is the version Tyler preferred and is the canonical reference.
