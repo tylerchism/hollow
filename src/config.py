@@ -39,6 +39,9 @@ class Config:
     # Discord channel name this agent listens to (default: "tarn")
     discord_channel_name: str = "tarn"
 
+    # Hardcoded Discord channel ID for Tarn (fallback if guild cache lookup fails)
+    discord_tarn_channel_id: int = 0
+
     # Whether to send a startup notification on boot (default: True).
     # Set STARTUP_NOTIFICATION=false to silence startup messages for agents
     # that share a conversation channel (e.g. Flux on #trader-bot).
@@ -73,6 +76,7 @@ def load_config(env_path: Path | None = None) -> Config:
         api_host=os.getenv("API_HOST", "127.0.0.1"),
         history_char_budget=int(os.getenv("HISTORY_CHAR_BUDGET", "500000")),
         discord_channel_name=os.getenv("DISCORD_CHANNEL_NAME", "tarn"),
+        discord_tarn_channel_id=int(os.getenv("DISCORD_TARN_CHANNEL_ID", "0")),
         startup_notification=os.getenv("STARTUP_NOTIFICATION", "true").strip().lower() not in ("false", "0", "no"),
     )
     return config

@@ -601,7 +601,7 @@ async def _send_startup_notification(config, agent, discord_bot) -> None:
     # Startup is a read-only context review — block Bash so the agent cannot
     # execute shell commands (restart-tarn, kill, pkill, etc.) while booting.
     from src.agent import NATIVE_TOOLS
-    STARTUP_ALLOWED_TOOLS = [t for t in NATIVE_TOOLS if t != "Bash"]
+    STARTUP_ALLOWED_TOOLS = [t for t in NATIVE_TOOLS if t in ("Read", "Glob", "Grep")]
 
     # ── Phase 1: read pre-kill snapshot ───────────────────────────────────────
     snapshot = read_snapshot(config.data_dir)
@@ -632,6 +632,14 @@ async def _send_startup_notification(config, agent, discord_bot) -> None:
             await asyncio.sleep(2)
         except asyncio.TimeoutError:
             log.warning("Discord ready_event timed out after 30s — proceeding with startup notification anyway")
+
+        # Write active channel file before context review so any tool calls go to the right place
+        _tarn_channel_id = str(origin_channel_id or config.discord_tarn_channel_id or "")
+        if discord_bot and _tarn_channel_id:
+            try:
+                discord_bot._write_active_channel(_tarn_channel_id)
+            except Exception:
+                log.debug("Startup: failed to pre-set active channel", exc_info=True)
     else:
         await asyncio.sleep(8)
 
@@ -753,7 +761,15 @@ async def _send_startup_notification(config, agent, discord_bot) -> None:
         # Watchdog or unexpected crash — broadcast to all tarn Discord channels
 
         if discord_bot and discord_bot._client:
-            for discord_chat_id, tarn_channel in discord_bot.get_tarn_chat_ids():
+            tarn_channels = discord_bot.get_tarn_chat_ids()
+            if not tarn_channels and config.discord_tarn_channel_id:
+                log.warning("Startup: get_tarn_chat_ids() returned empty — using DISCORD_TARN_CHANNEL_ID fallback")
+                try:
+                    _fb_ch = await discord_bot._client.fetch_channel(config.discord_tarn_channel_id)
+                    tarn_channels = [(str(config.discord_tarn_channel_id), _fb_ch)]
+                except Exception:
+                    log.warning("Startup: hardcoded fallback fetch also failed", exc_info=True)
+            for discord_chat_id, tarn_channel in tarn_channels:
                 try:
                     await discord_bot._send_chunked(tarn_channel, ping)
                 except Exception:

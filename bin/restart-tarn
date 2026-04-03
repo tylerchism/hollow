@@ -5,13 +5,27 @@
 #
 # Safe to call from within the running Tarn process — this bash script is its
 # own OS process and survives independently even if its Python parent is killed.
+#
+# Reads /tmp/hollow_active_discord_tarn (written by Tarn on every inbound message)
+# before killing the old process, so the new process wakes up in the right channel.
 
 set -euo pipefail
 
 TARN_PORT=18800
 TARN_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 
-exec "$TARN_DIR/bin/restart-agent" tarn "$TARN_PORT" \
+# Capture the active Discord channel before the kill so the new process
+# wakes up in the same channel Tyler was using.
+ORIGIN_CHANNEL_ARGS=()
+_ACTIVE_CHANNEL_FILE="/tmp/hollow_active_discord_tarn"
+if [[ -f "$_ACTIVE_CHANNEL_FILE" ]]; then
+    _ORIGIN="$(cat "$_ACTIVE_CHANNEL_FILE")"
+    if [[ -n "$_ORIGIN" ]]; then
+        ORIGIN_CHANNEL_ARGS=(--origin-channel "$_ORIGIN")
+    fi
+fi
+
+exec "$TARN_DIR/bin/restart-agent" "${ORIGIN_CHANNEL_ARGS[@]}" tarn "$TARN_PORT" \
   /home/tchism/.local/bin/uv run python -m src.main \
   --port "$TARN_PORT" \
   --identity-dir "$TARN_DIR/agents/tarn" \
