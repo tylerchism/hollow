@@ -25,7 +25,21 @@ if [[ -f "$_ACTIVE_CHANNEL_FILE" ]]; then
     fi
 fi
 
-exec "$TARN_DIR/bin/restart-agent" "${ORIGIN_CHANNEL_ARGS[@]}" tarn "$TARN_PORT" \
+# Pass through any --reason argument so callers can label why they restarted.
+REASON_ARGS=()
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --reason)
+            REASON_ARGS=(--reason "${2:?restart-tarn: --reason requires an argument}")
+            shift 2
+            ;;
+        *)
+            shift
+            ;;
+    esac
+done
+
+exec "$TARN_DIR/bin/restart-agent" "${ORIGIN_CHANNEL_ARGS[@]}" "${REASON_ARGS[@]}" tarn "$TARN_PORT" \
   /home/tchism/.local/bin/uv run python -m src.main \
   --port "$TARN_PORT" \
   --identity-dir "$TARN_DIR/agents/tarn" \

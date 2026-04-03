@@ -267,10 +267,11 @@ def try_restart(name: str, port: int, discord_token: Optional[str] = None) -> bo
     ]
 
     try:
-        # bin/restart-agent signature: NAME PORT LAUNCH_CMD...
-        # Log file is derived internally as /tmp/<NAME>.log.
+        # bin/restart-agent signature: [--reason REASON] NAME PORT LAUNCH_CMD...
+        # Log file is derived internally as data/<NAME>.log.
+        reason = f"watchdog: {name} health check failed (connection refused)"
         subprocess.run(
-            ["bash", str(restart_agent), name, str(port)] + launch_cmd,
+            ["bash", str(restart_agent), "--reason", reason, name, str(port)] + launch_cmd,
             cwd=str(HOLLOW_ROOT),
             check=False,
         )

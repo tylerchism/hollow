@@ -24,12 +24,25 @@
 
 set -euo pipefail
 
-# Parse optional --origin-channel flag
+# Parse optional flags
 ORIGIN_CHANNEL=""
-if [ "${1:-}" = "--origin-channel" ]; then
-  ORIGIN_CHANNEL="${2:?restart-agent: --origin-channel requires a CHANNEL_ID argument}"
-  shift 2
-fi
+RESTART_REASON=""
+
+while true; do
+  case "${1:-}" in
+    --origin-channel)
+      ORIGIN_CHANNEL="${2:?restart-agent: --origin-channel requires a CHANNEL_ID argument}"
+      shift 2
+      ;;
+    --reason)
+      RESTART_REASON="${2:?restart-agent: --reason requires a reason argument}"
+      shift 2
+      ;;
+    *)
+      break
+      ;;
+  esac
+done
 
 NAME="${1:?restart-agent: NAME is required}"
 PORT="${2:?restart-agent: PORT is required}"
@@ -43,6 +56,30 @@ fi
 
 HOLLOW_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 LOG_FILE="${HOLLOW_ROOT}/data/${NAME}.log"
+RESTART_LOG="${HOLLOW_ROOT}/data/hollow-restart-log.jsonl"
+
+# ── Phase 0: write restart traceability log entry ────────────────────────────
+# Determine trigger type from reason prefix, default to "manual"
+_TRIGGER="manual"
+_DETAIL="${RESTART_REASON:-unknown}"
+if [ -z "$RESTART_REASON" ]; then
+  _TRIGGER="manual"
+  _DETAIL="unknown"
+elif echo "$RESTART_REASON" | grep -q "^watchdog:"; then
+  _TRIGGER="watchdog"
+elif echo "$RESTART_REASON" | grep -q "^maintenance"; then
+  _TRIGGER="maintenance"
+elif echo "$RESTART_REASON" | grep -q "^tarn-self\|^self"; then
+  _TRIGGER="tarn-self"
+fi
+
+_TS="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+_LOG_ENTRY="{\"timestamp\": \"${_TS}\", \"trigger\": \"${_TRIGGER}\", \"detail\": \"${_DETAIL}\", \"agent\": \"${NAME}\"}"
+echo "$_LOG_ENTRY" >> "$RESTART_LOG"
+echo "[restart-agent:$NAME] Restart event logged (trigger=${_TRIGGER})"
+
+# Write reason to /tmp/<NAME>_restart_reason so new process can read it on startup
+printf '%s' "${_DETAIL}" > "/tmp/${NAME}_restart_reason"
 
 # ── Phase 1: pre-kill snapshot ───────────────────────────────────────────────
 # Call POST /snapshot on the running process so it can persist its current

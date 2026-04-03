@@ -852,6 +852,21 @@ async def _send_startup_notification(config, agent, discord_bot) -> None:
     restart_reason = os.environ.get("TARN_RESTART_REASON", "").strip().lower()
     is_maintenance = restart_reason == "maintenance"
 
+    # ── Read restart reason from /tmp/<agent>_restart_reason ─────────────────
+    # Written by bin/restart-agent before killing the old process.
+    # Delete after reading so it doesn't persist across future restarts.
+    _agent_name_for_reason = config.identity_dir.name if config.identity_dir else "tarn"
+    _restart_reason_file = Path(f"/tmp/{_agent_name_for_reason}_restart_reason")
+    _restart_reason_text: str | None = None
+    try:
+        if _restart_reason_file.exists():
+            _restart_reason_text = _restart_reason_file.read_text().strip() or None
+            _restart_reason_file.unlink(missing_ok=True)
+            if _restart_reason_text:
+                log.info("Startup: restart reason from file: %s", _restart_reason_text)
+    except Exception:
+        log.debug("Startup: failed to read restart reason file", exc_info=True)
+
     # Startup is a read-only context review — block Bash so the agent cannot
     # execute shell commands (restart-tarn, kill, pkill, etc.) while booting.
     from src.agent import NATIVE_TOOLS
@@ -911,7 +926,11 @@ async def _send_startup_notification(config, agent, discord_bot) -> None:
                     log.exception("Failed to send maintenance restart notification to Discord channel %s", discord_chat_id)
         return
 
-    ping = "I'm back — reviewing context and picking up where we left off..."
+    # Build startup ping message with restart reason disclosure
+    if _restart_reason_text:
+        ping = f"Back up. Restart triggered by: {_restart_reason_text}"
+    else:
+        ping = "Back up. Restart reason unknown — check data/hollow-restart-log.jsonl"
 
     def _build_startup_prompt(recent_history: str, bg_context: str) -> str:
         """Build the startup prompt with conversation history + snapshot, no MC board."""
