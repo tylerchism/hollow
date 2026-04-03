@@ -36,6 +36,17 @@ Long-running task flow (long_running: true OR estimated duration > 5 min)
 Recovery: if task_executor picks up in_progress task with fire_job_id in notes,
 poll /result first.  If pending → resume wait-job.  If done → mark done.
 If 404 → re-fire.
+
+expected_duration_minutes field
+--------------------------------
+# TODO(expected-duration-minutes): MC tasks schema does not yet have an
+# expected_duration_minutes field.  task_executor uses LONG_TASK_THRESHOLD_MINS
+# (env: LONG_TASK_THRESHOLD_MINS, default 5) to determine whether to use the
+# fire+wait-job path.  Once the field exists, executors should set it on claim
+# so the watchdog can use dynamic thresholds instead of the fixed 15-minute
+# default.  Until then, long-running tasks must be tagged with 'long_running'.
+# Backlog task created: nS2HVcpI6pvGawLE85eCN
+# See also: MC schema backlog item for adding the column to tasks SQLite.
 """
 
 from __future__ import annotations
