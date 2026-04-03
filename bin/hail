@@ -6,12 +6,20 @@ Run 'python setup.py' to generate hollow.config.json.
 
 Usage:
     hail <agent> <task> [--user USER_ID] [--context CONTEXT_TEXT]
+    hail --detach <agent> <task>         # fire async, print job_id and exit
+    hail --poll <job_id> <agent>         # poll /result/<job_id> until done
+    hail --detach <agent> <task> --result-channel <channel>  # post result to Discord
 
 Options:
-    --user USER_ID      Stable per-user chat_id (e.g. Tyler's Telegram ID).
-                        Results in chat_id "<agent>_<user>". Defaults to "_main".
-    --context TEXT      Context string injected into the agent's system prompt,
-                        giving the sub-agent background from the delegating session.
+    --user USER_ID           Stable per-user chat_id (e.g. Tyler's Telegram ID).
+                             Results in chat_id "<agent>_<user>". Defaults to "_main".
+    --context TEXT           Context string injected into the agent's system prompt,
+                             giving the sub-agent background from the delegating session.
+    --detach                 Call /fire instead of /ask; print job_id and exit immediately.
+    --poll JOB_ID            Poll /result/<job_id> every 5s until done; exit 0 on success,
+                             1 on error. Agent name is still required for URL resolution.
+    --result-channel CHANNEL When using --detach, agent posts result to this Discord channel.
+    --idempotency-key KEY    Idempotency key for /fire dedup.
 """
 
 from __future__ import annotations
@@ -19,6 +27,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -26,10 +35,11 @@ from pathlib import Path
 HOLLOW_ROOT = Path(__file__).parent.parent.resolve()
 CONFIG_PATH = HOLLOW_ROOT / "hollow.config.json"
 TIMEOUT = 300
+POLL_INTERVAL = 10  # seconds between /result polls
 
 
-def load_agents() -> dict[str, str]:
-    """Load agent name -> URL mapping from hollow.config.json."""
+def load_config() -> dict:
+    """Load hollow.config.json."""
     if not CONFIG_PATH.exists():
         print(
             f"Error: hollow.config.json not found at {CONFIG_PATH}\n"
@@ -37,37 +47,144 @@ def load_agents() -> dict[str, str]:
             file=sys.stderr,
         )
         sys.exit(1)
-
     try:
-        cfg = json.loads(CONFIG_PATH.read_text())
+        return json.loads(CONFIG_PATH.read_text())
     except (json.JSONDecodeError, OSError) as e:
         print(f"Error: could not parse hollow.config.json: {e}", file=sys.stderr)
         sys.exit(1)
 
-    agents = {}
+
+def load_agents(cfg: dict | None = None) -> dict[str, dict]:
+    """Load agent name -> {ask_url, fire_url, result_base_url} mapping."""
+    if cfg is None:
+        cfg = load_config()
+
+    agents: dict[str, dict] = {}
+
+    # Include coordinator (tarn) if present
+    coordinator = cfg.get("coordinator", {})
+    coord_keyword = coordinator.get("name", "")
+    coord_port = coordinator.get("port")
+    if coord_keyword and coord_port:
+        base = f"http://127.0.0.1:{coord_port}"
+        agents[coord_keyword.lower()] = {
+            "ask_url": f"{base}/ask",
+            "fire_url": f"{base}/fire",
+            "result_base": base,
+        }
+
     for agent in cfg.get("agents", []):
         keyword = agent.get("hail_keyword", agent.get("name", ""))
         port = agent.get("port")
         if keyword and port:
-            agents[keyword.lower()] = f"http://127.0.0.1:{port}/ask"
+            base = f"http://127.0.0.1:{port}"
+            agents[keyword.lower()] = {
+                "ask_url": f"{base}/ask",
+                "fire_url": f"{base}/fire",
+                "result_base": base,
+            }
 
     return agents
 
 
+def do_ask(url: str, payload_data: dict) -> None:
+    """POST to /ask and print the response. Synchronous."""
+    payload = json.dumps(payload_data).encode()
+    req = urllib.request.Request(
+        url, data=payload, headers={"Content-Type": "application/json"}
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
+            data = json.loads(resp.read().decode())
+            print(data.get("response", json.dumps(data, indent=2)))
+    except urllib.error.URLError as e:
+        print(f"Error connecting to agent: {e}", file=sys.stderr)
+        sys.exit(1)
+    except TimeoutError:
+        print(f"Timeout after {TIMEOUT}s waiting for agent", file=sys.stderr)
+        sys.exit(1)
+
+
+def do_fire(fire_url: str, payload_data: dict) -> str:
+    """POST to /fire, print job_id to stdout, and return job_id."""
+    payload = json.dumps(payload_data).encode()
+    req = urllib.request.Request(
+        fire_url, data=payload, headers={"Content-Type": "application/json"}
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            data = json.loads(resp.read().decode())
+            job_id = data.get("job_id", "")
+            # Print only the job_id so callers can capture it with $()
+            print(job_id)
+            return job_id
+    except urllib.error.URLError as e:
+        print(f"Error connecting to /fire: {e}", file=sys.stderr)
+        sys.exit(1)
+
+
+def do_poll(result_base: str, job_id: str) -> None:
+    """Poll /result/{job_id} every POLL_INTERVAL seconds until done or error.
+
+    Exits 0 on done (prints response to stdout).
+    Exits 1 on error (prints error to stderr).
+    """
+    url = f"{result_base}/result/{job_id}"
+    print(f"Polling {url} every {POLL_INTERVAL}s ...", file=sys.stderr)
+    while True:
+        try:
+            req = urllib.request.Request(url)
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                data = json.loads(resp.read().decode())
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                print(f"Job {job_id} not found (agent may have restarted).", file=sys.stderr)
+                sys.exit(1)
+            print(f"HTTP error polling {url}: {e}", file=sys.stderr)
+            time.sleep(POLL_INTERVAL)
+            continue
+        except urllib.error.URLError as e:
+            print(f"Network error polling {url}: {e}", file=sys.stderr)
+            time.sleep(POLL_INTERVAL)
+            continue
+
+        status = data.get("status", "pending")
+        if status == "done":
+            print(data.get("response", ""))
+            sys.exit(0)
+        elif status == "error":
+            print(f"Job {job_id} failed: {data.get('response', 'unknown error')}", file=sys.stderr)
+            sys.exit(1)
+        elif status == "not_found":
+            print(f"Job {job_id} not found.", file=sys.stderr)
+            sys.exit(1)
+        else:
+            # pending — keep waiting
+            time.sleep(POLL_INTERVAL)
+
+
 def main():
-    agents = load_agents()
+    cfg = load_config()
+    agents = load_agents(cfg)
 
     parser = argparse.ArgumentParser(
         description="Route tasks to specialist agents via HTTP POST.",
-        usage="hail <agent> <task...> [--user USER_ID] [--context CONTEXT]",
+        usage=(
+            "hail <agent> <task...> [--user USER_ID] [--context CONTEXT]\n"
+            "       hail --detach <agent> <task...> [--result-channel CHANNEL]\n"
+            "       hail --poll <job_id> <agent>"
+        ),
     )
-    parser.add_argument("agent", help="Agent name")
-    parser.add_argument("task", nargs="+", help="Task description (multi-word ok)")
+    parser.add_argument(
+        "agent",
+        help="Agent name (required even for --poll, used for URL resolution)",
+    )
+    parser.add_argument("task", nargs="*", help="Task description (multi-word ok)")
     parser.add_argument(
         "--user",
         default=None,
         metavar="USER_ID",
-        help="User identifier for stable per-user chat_id (e.g. Telegram chat_id)",
+        help="User identifier for stable per-user chat_id",
     )
     parser.add_argument(
         "--context",
@@ -75,46 +192,77 @@ def main():
         metavar="TEXT",
         help="Context string to inject into the agent's system prompt",
     )
+    parser.add_argument(
+        "--detach",
+        action="store_true",
+        help="Call /fire instead of /ask; print job_id and exit immediately",
+    )
+    parser.add_argument(
+        "--poll",
+        default=None,
+        metavar="JOB_ID",
+        help="Poll /result/<JOB_ID> every 5s until done; agent arg still required",
+    )
+    parser.add_argument(
+        "--result-channel",
+        default="",
+        metavar="CHANNEL",
+        help="Discord channel name to post result to (only with --detach)",
+    )
+    parser.add_argument(
+        "--idempotency-key",
+        default="",
+        metavar="KEY",
+        help="Idempotency key for /fire dedup",
+    )
 
-    if len(sys.argv) < 3:
+    if len(sys.argv) < 2:
         parser.print_help()
         print(f"\nAvailable agents: {', '.join(sorted(agents))}")
         sys.exit(1)
 
     args = parser.parse_args()
 
-    agent = args.agent.lower()
-    task = " ".join(args.task)
+    agent_name = args.agent.lower()
 
-    if agent not in agents:
-        print(f"Unknown agent: {agent}")
+    if agent_name not in agents:
+        print(f"Unknown agent: {agent_name}")
         print(f"Available: {', '.join(sorted(agents))}")
         sys.exit(1)
 
-    url = agents[agent]
-    # Stable per-user chat_id: "<agent>_<user_id>" or fallback "<agent>_main"
+    agent_urls = agents[agent_name]
+
+    # ── --poll mode ────────────────────────────────────────────────────────────
+    if args.poll:
+        do_poll(agent_urls["result_base"], args.poll)
+        return  # do_poll calls sys.exit internally
+
+    # ── normal / --detach mode ─────────────────────────────────────────────────
+    task_parts = args.task
+    if not task_parts:
+        parser.print_help()
+        print(f"\nAvailable agents: {', '.join(sorted(agents))}")
+        sys.exit(1)
+
+    task = " ".join(task_parts)
+
     user_suffix = args.user if args.user else "main"
-    chat_id = f"{agent}_{user_suffix}"
+    chat_id = f"{agent_name}_{user_suffix}"
 
     payload_data: dict = {"message": task, "chat_id": chat_id}
     if args.context:
         payload_data["context"] = args.context
 
-    payload = json.dumps(payload_data).encode()
-    req = urllib.request.Request(
-        url, data=payload, headers={"Content-Type": "application/json"}
-    )
-
-    try:
-        with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
-            data = json.loads(resp.read().decode())
-            print(data.get("response", json.dumps(data, indent=2)))
-    except urllib.error.URLError as e:
-        print(f"Error connecting to {agent} at {url}: {e}", file=sys.stderr)
-        sys.exit(1)
-    except TimeoutError:
-        print(f"Timeout after {TIMEOUT}s waiting for {agent}", file=sys.stderr)
-        sys.exit(1)
+    if args.detach:
+        # /fire mode
+        if args.result_channel:
+            payload_data["result_channel"] = args.result_channel
+        if args.idempotency_key:
+            payload_data["idempotency_key"] = args.idempotency_key
+        do_fire(agent_urls["fire_url"], payload_data)
+    else:
+        # /ask mode (synchronous)
+        do_ask(agent_urls["ask_url"], payload_data)
 
 
 if __name__ == "__main__":
