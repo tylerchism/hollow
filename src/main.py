@@ -63,20 +63,17 @@ def make_api_app(
 
     # Claude API probe cache: (result_ok: bool, reason: str, checked_at: float)
     # TTL of 5 minutes so watchdog polls (every 5 min) don't hammer the API.
-    _claude_probe_cache: list = [None, "", 0.0]
+    # Index 3: True while a background refresh task is running (prevents duplicates).
+    _claude_probe_cache: list = [None, "", 0.0, False]
     _CLAUDE_PROBE_TTL = 300
 
-    async def _probe_claude_api() -> tuple[bool, str]:
-        """Send a minimal probe to the Claude API to verify reachability.
+    async def _run_probe_background() -> None:
+        """Execute the Claude API probe and update the cache.
 
-        Returns (ok, reason).  Uses claude_code_sdk (same transport the agent
-        uses) with max_turns=1 so the call is as cheap as possible.
-        Result is cached for _CLAUDE_PROBE_TTL seconds.
+        Always runs as a fire-and-forget asyncio.Task so it never blocks
+        /health.  The in-flight flag (index 3) prevents duplicate tasks.
         """
-        now = _time.time()
-        if _claude_probe_cache[0] is not None and now - _claude_probe_cache[2] < _CLAUDE_PROBE_TTL:
-            return _claude_probe_cache[0], _claude_probe_cache[1]
-
+        _claude_probe_cache[3] = True
         try:
             from claude_code_sdk import (
                 query as _sdk_query,
@@ -100,7 +97,36 @@ def make_api_app(
         _claude_probe_cache[0] = ok
         _claude_probe_cache[1] = reason
         _claude_probe_cache[2] = _time.time()
-        return ok, reason
+        _claude_probe_cache[3] = False
+
+    def _get_cached_claude_status() -> tuple[bool, str]:
+        """Return the most recent cached Claude probe result immediately (no I/O).
+
+        If the cache is stale (or empty), kick off a background refresh task so
+        the *next* /health call will have a fresh value.  This means /health
+        always returns in O(1) — it is never blocked by an SDK round-trip.
+
+        On first call (cache empty), we optimistically return ok=True with a
+        "probe_pending" reason so the endpoint doesn't immediately report
+        degraded before the first probe completes.
+        """
+        now = _time.time()
+        cache_age = now - _claude_probe_cache[2]
+        in_flight = _claude_probe_cache[3]
+
+        # Kick off a background refresh if stale and not already running
+        if not in_flight and (
+            _claude_probe_cache[0] is None or cache_age >= _CLAUDE_PROBE_TTL
+        ):
+            asyncio.create_task(
+                _run_probe_background(),
+                name="claude_api_probe",
+            )
+
+        # Return cached value (optimistic on first call before probe completes)
+        if _claude_probe_cache[0] is None:
+            return True, "probe_pending"
+        return _claude_probe_cache[0], _claude_probe_cache[1]
 
     async def handle_health(request: web.Request) -> web.Response:
         cfg = agent.config
@@ -115,8 +141,9 @@ def make_api_app(
             except Exception:
                 bots["discord"] = False
 
-        # Probe the Claude API — degraded if unreachable
-        claude_ok, claude_reason = await _probe_claude_api()
+        # Read the cached Claude probe result — never awaits the SDK.
+        # A background task refreshes the cache when it goes stale.
+        claude_ok, claude_reason = _get_cached_claude_status()
 
         degraded_reasons: list[str] = []
         if bots and not all(bots.values()):
