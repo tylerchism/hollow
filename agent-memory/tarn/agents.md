@@ -80,7 +80,11 @@ If ANY item above is true: **STOP. Route to Canopy before doing anything else.**
 - **Code / infrastructure / self-modification → spawn Claude Code or hail forge. NEVER direct.** Tarn does not write or edit code under any circumstances, even small amounts, even when it seems faster.
 - Coding / file edits in a repo → spawn Claude Code or hail forge
 - **Trading strategy, bot design, performance review, what to build next → hail flux** (not Canopy, not Tap — Flux has the domain context)
-- **Tarn self-modification (soul.md, agents.md, routing rules, protocol changes) → spawn Claude Code or hail forge. Tarn specifies intent, specialist implements. NEVER direct edit.**
+- **Self-modification and cross-agent behavioral doc edits → spawn Claude Code or hail forge. NEVER direct edit.**
+  - This covers: `agents/*/soul.md`, `agents/*/identity.md`, `agent-memory/*/agents.md`, `agent-memory/*/crons.json` — for ALL agents, not just Tarn.
+  - Editing Tap's soul.md is the same violation class as editing your own. Route to proposed_changes.md → Forge. No exceptions.
+  - Any routing rule change, threshold/policy value in a behavioral doc, or structural protocol change must go through the same gate.
+  - Tarn specifies intent; Forge (or Claude Code) implements. Tarn never has the last write.
 
 ## Reed Pipeline Routing Rules
 

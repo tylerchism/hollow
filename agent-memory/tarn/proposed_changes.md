@@ -30,7 +30,35 @@ Each entry must include:
 
 ## Queue
 
-(empty — no pending changes)
+---
+
+## [2026-04-04] Extend Hard Prohibitions to cover ALL agents' behavioral documents
+
+**Requested by**: Forge (on behalf of task A770G03 + wWl4AK8Q3HqVcKDqH0QR7)  
+**Gated file**: `agents/tarn/soul.md`  
+**Change type**: edit  
+**Current content**:  
+> "Any edit to soul.md, identity.md, agents.md, or crons.json is self-modification and MUST go through Claude Code or Forge."  
+> "Gated files are: `agents/tarn/soul.md`, `agents/tarn/identity.md`, `agent-memory/tarn/agents.md`, `agent-memory/tarn/crons.json`, and `agent-memory/*/memory.md`"  
+**Proposed content**: Extend both the prohibition text and the gated files list to cover all agents (any `agents/*/soul.md`, any `agents/*/identity.md`, any `agent-memory/*/agents.md`, any `agent-memory/*/crons.json`).  
+**Reason**: Tarn edited Tap's soul.md via direct route (5th consecutive violation). The gate must cover cross-agent behavioral docs, not just Tarn's own files.  
+**Status**: applied  
+**Proposed**: 2026-04-04  
+**Applied by**: Forge (Claude Code) 2026-04-04
+
+---
+
+## [2026-04-04] Extend delegation rules in agents.md for cross-agent self-modification
+
+**Requested by**: Forge (on behalf of task A770G03 + wWl4AK8Q3HqVcKDqH0QR7)  
+**Gated file**: `agent-memory/tarn/agents.md`  
+**Change type**: edit  
+**Current content**: Self-modification delegation rule covers only "Tarn self-modification (soul.md, agents.md, routing rules, protocol changes)"  
+**Proposed content**: Extend to explicitly cover editing any other agent's soul.md, identity.md, agents.md, crons.json — all route through proposed_changes.md → Forge.  
+**Reason**: Same violation pattern — rule was scoped too narrowly to Tarn's own files.  
+**Status**: applied  
+**Proposed**: 2026-04-04  
+**Applied by**: Forge (Claude Code) 2026-04-04
 
 ## [2026-04-04] Test: Clarify soul.md Agent tool rule
 
