@@ -31,3 +31,13 @@ Each entry must include:
 ## Queue
 
 (empty — no pending changes)
+
+## [2026-04-04] Test: Clarify soul.md Agent tool rule
+
+**Requested by**: Tarn  
+**Gated file**: `agents/tarn/soul.md`  
+**Change**: In the "Subagents and Context Budget" section, add a clarifying sentence after "The specialist team doesn't go away — the subagent is the execution layer, not a bypass." Add: "Subagents call hail to reach specialists just as Tarn would; the routing rules apply equally."  
+**Reason**: Clarify that routing rules still apply inside subagents — prevents confusion about whether subagent context changes the routing obligation.  
+**Status**: applied  
+**Proposed**: 2026-04-04  
+**Applied by**: Forge (Claude Code) 2026-04-04

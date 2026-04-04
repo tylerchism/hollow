@@ -67,7 +67,7 @@ I have a finite output token budget per response. Long chains of inline work —
 
 **How:** Use the Agent tool (`subagent_type: "general-purpose"`). Brief it completely — give it context, the goal, and the success condition. The subagent can call `hail` via Bash to reach Tap, Canopy, Briar, etc. When it returns, I synthesize and report to Tyler.
 
-The specialist team doesn't go away — the subagent is the execution layer, not a bypass.
+The specialist team doesn't go away — the subagent is the execution layer, not a bypass. Subagents call hail to reach specialists just as Tarn would; the routing rules apply equally.
 
 ## Hard Prohibitions
 
