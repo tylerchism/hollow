@@ -55,7 +55,8 @@ def main():
         print("  mc tasks update <id> [--status=<status>] [--notes=\"...\"] [--description=\"...\"] [--title=\"...\"] [--priority=high|medium|low] [--blocked-reason=\"...\"] [--next-task='{\"title\":\"...\"}'] [--isolation=worktree] [--heartbeat-at=<iso8601>] [--lease-expires-at=<iso8601>] [--locked-by=<executor>] [--expected-duration-minutes=<N>]")
         print("  mc ideas list")
         print("  mc ideas create \"<title>\" [--body=\"...\"] [--type=idea|spike]")
-        print("  mc activity log \"<action>\" [--details=\"...\"]")
+        print("  mc activity log \"<action>\" [--details=\"...\"] [--route=\"...\"] [--summary=\"...\"] [--action-type=\"...\"]")
+        print("    Structured format: mc activity log \"completed: <title> | route: <route> | summary: <summary>\"")
         sys.exit(1)
 
     resource = sys.argv[1]
@@ -160,9 +161,52 @@ def main():
             if not positional:
                 print("Error: action required", file=sys.stderr)
                 sys.exit(1)
-            body = {"agent": "tarn", "action_type": positional[0]}
+            raw_action = positional[0]
+
+            # Parse structured format: "completed: X | route: Y | summary: Z"
+            # Split on ' | ' to extract optional route and summary segments.
+            parts = [p.strip() for p in raw_action.split(" | ")]
+            action_text = parts[0]  # e.g. "completed: Fix the bug"
+            extracted_route = None
+            extracted_summary = None
+            for part in parts[1:]:
+                if part.startswith("route:"):
+                    extracted_route = part[len("route:"):].strip()
+                elif part.startswith("summary:"):
+                    extracted_summary = part[len("summary:"):].strip()
+
+            # Derive action_type from the action text prefix (e.g. "completed:" -> "task.completed")
+            # Falls back to using the first segment verbatim if no known prefix matches.
+            action_prefix_map = {
+                "completed:": "task.completed",
+                "routing.decision": "routing.decision",
+                "task.created": "task.created",
+            }
+            derived_action_type = None
+            for prefix, atype in action_prefix_map.items():
+                if action_text.startswith(prefix) or action_text == prefix.rstrip(":"):
+                    derived_action_type = atype
+                    break
+            if derived_action_type is None:
+                # Use the raw text as-is for action_type (categorical)
+                derived_action_type = action_text
+
+            # Flags override auto-extracted values
+            route_chosen = flags.get("route", extracted_route)
+            summary = flags.get("summary", extracted_summary)
+            action_type = flags.get("action-type", derived_action_type)
+
+            body = {
+                "agent": os.environ.get("MC_AGENT", "tarn"),
+                "action": raw_action,
+                "action_type": action_type,
+            }
+            if route_chosen:
+                body["route_chosen"] = route_chosen
+            if summary:
+                body["summary"] = summary
             if "details" in flags:
-                body["details"] = flags["details"]
+                body["payload"] = {"details": flags["details"]}
             result = api("POST", "/api/agent-activity", data=body)
         else:
             print(f"Unknown activity operation: {operation}", file=sys.stderr)
