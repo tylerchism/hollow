@@ -451,6 +451,32 @@ def make_api_app(
     return app
 
 
+async def _ollama_chat(model: str, prompt: str, timeout: float = 60.0) -> str:
+    """Call the local Ollama HTTP API and return the response text.
+
+    Uses http://localhost:11434/api/generate with stream=False.
+    Returns empty string on error so callers can degrade gracefully.
+    """
+    import json as _json
+    try:
+        import aiohttp as _aiohttp
+        payload = {"model": model, "prompt": prompt, "stream": False}
+        async with _aiohttp.ClientSession() as session:
+            async with session.post(
+                "http://localhost:11434/api/generate",
+                json=payload,
+                timeout=_aiohttp.ClientTimeout(total=timeout),
+            ) as resp:
+                if resp.status != 200:
+                    log.warning("Ollama returned HTTP %d for model %s", resp.status, model)
+                    return ""
+                data = await resp.json(content_type=None)
+                return data.get("response", "").strip()
+    except Exception as exc:
+        log.warning("_ollama_chat failed (%s): %s", model, exc)
+        return ""
+
+
 def load_crons(memory_dir: Path) -> list[dict]:
     """Load cron job definitions from crons.json."""
     crons_path = memory_dir / "crons.json"
@@ -484,6 +510,12 @@ def setup_scheduler(
 
     for job_def in crons:
         name = job_def.get("name", "unnamed")
+
+        # Skip disabled crons
+        if not job_def.get("enabled", True):
+            log.info("Cron job '%s' is disabled — skipping", name)
+            continue
+
         schedule = job_def.get("schedule")
         if not schedule:
             log.warning("Cron job '%s' has no schedule — skipping", name)
@@ -511,6 +543,69 @@ def setup_scheduler(
             day_of_week=parts[4],
             timezone=tz,
         )
+
+        # ── Local-model cron (no Claude API) ──────────────────────────────────
+        # If model starts with "local:" or prompt == "HEARTBEAT_LOCAL_OLLAMA",
+        # use Ollama directly instead of the Claude SDK.
+        _cron_model = job_def.get("model", "")
+        _use_local_model = _cron_model.startswith("local:") or prompt == "HEARTBEAT_LOCAL_OLLAMA"
+        _local_ollama_model = _cron_model.replace("local:", "") if _cron_model.startswith("local:") else "gemma4:e4b"
+
+        if _use_local_model:
+            async def cron_handler(  # type: ignore[misc]
+                _name=name,
+                _chat_id=chat_id,
+                _ollama_model=_local_ollama_model,
+                _discord_channel_name=discord_channel_name,
+            ):
+                """Heartbeat cron: uses local Ollama model, no Claude API."""
+                log.info("Cron job '%s' firing (local Ollama: %s)", _name, _ollama_model)
+                try:
+                    # Build a minimal task-state prompt for the heartbeat check
+                    import subprocess as _sp
+                    task_summary = ""
+                    try:
+                        result = _sp.run(
+                            ["python3", "-c",
+                             "import subprocess, json; "
+                             "r = subprocess.run(['curl','-s','http://localhost:3333/api/tasks?status=in_progress',"
+                             "'-H','x-api-key: 462f220e3c3f15324825a86373da874f92302bf6fc646e3330731468cc959c22'],"
+                             "capture_output=True,text=True); "
+                             "tasks=json.loads(r.stdout) if r.stdout else []; "
+                             "print(', '.join(t.get('title','?')[:60] for t in tasks[:5]) or 'none')"],
+                            capture_output=True, text=True, timeout=10,
+                        )
+                        task_summary = result.stdout.strip()
+                    except Exception:
+                        task_summary = "unknown"
+
+                    heartbeat_prompt = (
+                        f"You are Tarn, an AI agent running on a server. "
+                        f"Current in-progress tasks: {task_summary or 'none'}. "
+                        f"In one sentence, confirm the system is running normally or flag any concern."
+                    )
+
+                    response = await _ollama_chat(_ollama_model, heartbeat_prompt, timeout=30.0)
+                    if not response:
+                        response = "Heartbeat: system running (Ollama unavailable for status check)."
+
+                    log.info("Heartbeat cron result: %s", response[:200])
+
+                    # Post to Discord #tarn if configured
+                    if discord_bot and discord_bot._client and _discord_channel_name:
+                        try:
+                            from src.channels.discord_channel import DiscordBot as _DB
+                            chan = await discord_bot._get_channel_by_name(_discord_channel_name)
+                            if chan:
+                                await discord_bot._send_chunked(chan, f"[heartbeat] {response}")
+                        except Exception:
+                            log.debug("Heartbeat: failed to post to Discord #%s", _discord_channel_name, exc_info=True)
+                except Exception:
+                    log.exception("Heartbeat cron '%s' failed", _name)
+
+            scheduler.add_job(cron_handler, trigger, id=name, name=name)
+            log.info("Scheduled LOCAL-MODEL cron job '%s': %s (%s) [%s]", name, schedule, tz, _local_ollama_model)
+            continue
 
         async def cron_handler(
             _name=name,
@@ -848,11 +943,6 @@ def _format_snapshot_context(snapshot: dict | None) -> str:
             )
         parts.append("Background tasks that were in-flight at shutdown:\n" + "\n".join(task_lines))
 
-    cron_jobs = snapshot.get("cron_jobs", [])
-    if cron_jobs:
-        cron_lines = [f"  - {j.get('name','?')} (next: {j.get('next_run_time') or 'unknown'})" for j in cron_jobs]
-        parts.append("Cron jobs at shutdown:\n" + "\n".join(cron_lines))
-
     if not parts:
         return ""
 
@@ -903,8 +993,8 @@ async def _send_startup_notification(config, agent, discord_bot) -> None:
     snapshot = read_snapshot(config.data_dir)
     snapshot_context = _format_snapshot_context(snapshot)
     if snapshot_context:
-        log.info("Startup: loaded pre-kill snapshot (%d bg tasks, %d cron jobs)",
-                 len(snapshot.get("bg_tasks", [])), len(snapshot.get("cron_jobs", [])))
+        log.info("Startup: loaded pre-kill snapshot (%d bg tasks)",
+                 len(snapshot.get("bg_tasks", [])))
     else:
         log.info("Startup: no usable snapshot found")
 
@@ -995,7 +1085,11 @@ async def _send_startup_notification(config, agent, discord_bot) -> None:
         return "\n".join(parts)
 
     async def _do_channel_review(chat_id: str, send_fn) -> None:
-        """Run the context review for a single channel and deliver the result."""
+        """Run the context review for a single channel using local Ollama (lean mode).
+
+        Uses gemma4:e4b via Ollama instead of Claude API to avoid token burn on restart.
+        Falls back to a static "I'm back" message if Ollama is unavailable.
+        """
         # If there's already a recent assistant reply, skip to avoid doubling.
         if await _channel_already_responded(agent, chat_id, elapsed_seconds=300):
             log.info("Startup: channel %s already has a recent reply — skipping", chat_id)
@@ -1004,20 +1098,35 @@ async def _send_startup_notification(config, agent, discord_bot) -> None:
         recent_history = await _load_recent_conversation(agent, chat_id)
         prompt = _build_startup_prompt(recent_history, snapshot_context)
 
+        # Lean-mode: use local Ollama instead of Claude API to save tokens.
+        # Prompt uses recency-first reasoning to avoid older high-volume topics dominating.
+        ollama_model = "gemma4:e4b"
+        lean_prompt = (
+            "You are reviewing recent conversation messages to determine what work is currently most important/active.\n\n"
+            "Here are the recent messages (most recent last):\n"
+        )
+        if recent_history:
+            lean_prompt += recent_history + "\n\n"
+        lean_prompt += (
+            "Based on these messages, what is the single most important thing currently in progress or recently requested? "
+            "Focus on the MOST RECENT incomplete task or request, not the one with the most message volume. "
+            "Provide a 1-2 sentence summary of what Tarn should pick up. "
+            "Be specific and terse. Do not use markdown."
+        )
+
         try:
             response = await asyncio.wait_for(
-                agent.reply(
-                    message=prompt,
-                    chat_id=chat_id,
-                    is_main_session=True,
-                    allowed_tools=STARTUP_ALLOWED_TOOLS,
-                ),
-                timeout=120,
+                _ollama_chat(ollama_model, lean_prompt, timeout=45.0),
+                timeout=50.0,
             )
             if response and response.strip():
+                log.info("Startup: Ollama context review succeeded for channel %s", chat_id)
                 await send_fn(response)
+            else:
+                log.warning("Startup: Ollama returned empty response for channel %s — using fallback", chat_id)
+                await send_fn("I'm back — ready to continue. What are we working on?")
         except asyncio.TimeoutError:
-            log.warning("Startup context review timed out after 120s for channel %s", chat_id)
+            log.warning("Startup context review (Ollama) timed out for channel %s", chat_id)
             await send_fn("I'm back — ready to continue. What are we working on?")
         except Exception:
             log.exception("Failed to run startup context review for channel %s", chat_id)
