@@ -1,0 +1,430 @@
+#!/usr/bin/env python3
+"""Spawn a new Hollow agent from templates.
+
+Creates all required files and config for a new specialist agent:
+  - agents/<name>/soul.md + identity.md from templates
+  - agent-memory/<name>/ with memory.md, agents.md, sessions/, memory/ dirs
+  - data/<name>/ data directory
+  - Entry in hollow.config.json (gitignored; edits the live config)
+  - Runs bin/generate-agents-md to refresh Tarn's agents.md
+  - Prints Discord channel setup instructions (manual step — bot lacks MANAGE_CHANNELS)
+
+Usage:
+  bin/spawn-agent <name> "<description>" [--role "<role>"] [--model <model>] [--port <port>] [--tools <tool,tool,...>]
+
+Options:
+  --role TEXT      Short role string (default: inferred from description first sentence)
+  --model MODEL    Model ID or alias: sonnet, opus, haiku (default: claude-sonnet-4-6)
+  --port PORT      Port number (default: auto-assigned from max existing port + 1)
+  --tools LIST     Comma-separated tool list or "all" (default: heuristic from role)
+  --dry-run        Print what would be done without making changes
+
+Tool heuristic (applied when --tools not given):
+  - "researcher" / "research" / "analyst" in role → bash,read,glob,grep,web_search,web_fetch
+  - "builder" / "engineer" / "developer" / "coder" in role → all
+  - "reviewer" / "auditor" / "critic" in role → bash,read,glob,grep
+  - "writer" / "editor" / "content" in role → bash,read,write,edit,glob,grep
+  - default → all
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import subprocess
+import sys
+from datetime import datetime
+from pathlib import Path
+
+HOLLOW_ROOT = Path(__file__).parent.parent.resolve()
+CONFIG_PATH = HOLLOW_ROOT / "hollow.config.json"
+AGENTS_DIR = HOLLOW_ROOT / "agents"
+MEMORY_DIR = HOLLOW_ROOT / "agent-memory"
+DATA_DIR = HOLLOW_ROOT / "data"
+TEMPLATES_DIR = HOLLOW_ROOT / "templates" / "agent"
+BIN_DIR = HOLLOW_ROOT / "bin"
+
+PORT_SCAN_START = 18792
+NAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{1,19}$")
+
+_MODEL_ALIASES = {
+    "sonnet": "claude-sonnet-4-6",
+    "opus": "claude-opus-4-6",
+    "haiku": "claude-haiku-4-5",
+}
+
+_TOOL_HEURISTIC = {
+    "researcher": "bash,read,glob,grep,web_search,web_fetch",
+    "research": "bash,read,glob,grep,web_search,web_fetch",
+    "analyst": "bash,read,glob,grep,web_search,web_fetch",
+    "builder": "all",
+    "engineer": "all",
+    "developer": "all",
+    "coder": "all",
+    "reviewer": "bash,read,glob,grep",
+    "auditor": "bash,read,glob,grep",
+    "critic": "bash,read,glob,grep",
+    "writer": "bash,read,write,edit,glob,grep",
+    "editor": "bash,read,write,edit,glob,grep",
+    "content": "bash,read,write,edit,glob,grep",
+}
+
+
+def cprint(msg: str, color: str = "") -> None:
+    codes = {
+        "green": "\033[92m",
+        "yellow": "\033[93m",
+        "red": "\033[91m",
+        "cyan": "\033[96m",
+        "dim": "\033[2m",
+        "reset": "\033[0m",
+    }
+    if color and color in codes:
+        print(f"{codes[color]}{msg}{codes['reset']}")
+    else:
+        print(msg)
+
+
+def load_config() -> dict:
+    if not CONFIG_PATH.exists():
+        cprint(f"Error: hollow.config.json not found at {CONFIG_PATH}", "red")
+        cprint("Run 'python setup.py' to generate it.", "red")
+        sys.exit(1)
+    try:
+        return json.loads(CONFIG_PATH.read_text())
+    except (json.JSONDecodeError, OSError) as e:
+        cprint(f"Error: could not parse hollow.config.json: {e}", "red")
+        sys.exit(1)
+
+
+def write_config(cfg: dict) -> None:
+    try:
+        text = json.dumps(cfg, indent=2) + "\n"
+        # Validate before writing
+        json.loads(text)
+        CONFIG_PATH.write_text(text)
+    except Exception as e:
+        cprint(f"Error: failed to write hollow.config.json: {e}", "red")
+        sys.exit(1)
+
+
+def render_template(template_path: Path, variables: dict[str, str]) -> str:
+    if not template_path.exists():
+        cprint(f"Error: template not found: {template_path}", "red")
+        sys.exit(1)
+    text = template_path.read_text()
+    for key, value in variables.items():
+        text = text.replace("{{" + key + "}}", value)
+    return text
+
+
+def resolve_model(model_arg: str) -> str:
+    if not model_arg:
+        return "claude-sonnet-4-6"
+    lower = model_arg.lower()
+    return _MODEL_ALIASES.get(lower, model_arg)
+
+
+def infer_tools(role: str, description: str) -> list[str]:
+    """Apply tool heuristic based on role/description keywords."""
+    combined = (role + " " + description).lower()
+    for keyword, tools_str in _TOOL_HEURISTIC.items():
+        if keyword in combined:
+            if tools_str == "all":
+                return ["all"]
+            return [t.strip() for t in tools_str.split(",")]
+    return ["all"]
+
+
+def find_next_port(cfg: dict) -> int:
+    """Find the next available port after all existing agent ports."""
+    used_ports = set()
+    coordinator = cfg.get("coordinator", {})
+    if coordinator.get("port"):
+        used_ports.add(int(coordinator["port"]))
+    for agent in cfg.get("agents", []):
+        if agent.get("port"):
+            used_ports.add(int(agent["port"]))
+
+    if not used_ports:
+        return PORT_SCAN_START
+
+    candidate = max(used_ports) + 1
+    # Check that the port is not already in use by another process
+    import socket
+    attempts = 0
+    while attempts < 20:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            try:
+                s.bind(("127.0.0.1", candidate))
+                return candidate
+            except OSError:
+                cprint(f"  Port {candidate} is in use — trying next", "dim")
+                candidate += 1
+                attempts += 1
+    cprint("Error: could not find an available port after 20 attempts. Use --port.", "red")
+    sys.exit(1)
+
+
+def generate_agent_memory_files(agent_name: str, role: str, coord_name: str,
+                                  cfg: dict, timestamp: str) -> dict[str, str]:
+    """Generate the content for agent-memory/<name>/ files."""
+    memory_md = render_template(
+        TEMPLATES_DIR / "memory.md",
+        {
+            "agent_name": agent_name.capitalize(),
+            "agent_role": role,
+            "init_timestamp": timestamp,
+        },
+    )
+
+    # agents.md: minimal roster (just enough for the new agent to know the team)
+    agents_md_lines = [
+        f"# Team — Hollow Agent System\n",
+        f"\nYou are part of a team of specialist agents coordinated by {coord_name.capitalize()}.\n",
+        f"\n## Team Roster\n",
+        "| Name | Port | Role |\n",
+        "|------|------|------|\n",
+    ]
+    agents_md_lines.append(
+        f"| {coord_name.capitalize()} | {cfg['coordinator']['port']} | "
+        f"Coordinator — {cfg['user']['name']}'s primary interface |\n"
+    )
+    for a in cfg.get("agents", []):
+        agents_md_lines.append(
+            f"| {a['name'].capitalize()} | {a['port']} | {a['role']} |\n"
+        )
+    agents_md_lines.append(
+        "\n## Your Role\n"
+        "You receive tasks from the coordinator via HTTP POST. "
+        "You do your specialized job and return results to the coordinator.\n"
+    )
+    agents_md = "".join(agents_md_lines)
+
+    return {
+        "memory.md": memory_md,
+        "agents.md": agents_md,
+    }
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Spawn a new Hollow specialist agent from templates.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument("name", help="Agent name (lowercase alphanumeric, hyphens OK, 2-20 chars)")
+    parser.add_argument("description", help="Short description of what this agent does")
+    parser.add_argument("--role", default="", help="Short role string (default: first sentence of description)")
+    parser.add_argument("--model", default="claude-sonnet-4-6", help="Model ID or alias (sonnet/opus/haiku)")
+    parser.add_argument("--port", type=int, default=0, help="Port number (default: auto-assigned)")
+    parser.add_argument(
+        "--tools", default="",
+        help='Comma-separated tool list or "all" (default: heuristic from role)',
+    )
+    parser.add_argument("--dry-run", action="store_true", help="Print what would be done without making changes")
+    args = parser.parse_args()
+
+    name = args.name.lower().strip()
+    description = args.description.strip()
+    role = args.role.strip() or description.split(".")[0].rstrip()
+    model = resolve_model(args.model)
+    dry_run = args.dry_run
+    timestamp = datetime.now().strftime("%Y-%m-%d")
+
+    # --- Validate name ---
+    if not NAME_PATTERN.match(name):
+        cprint(
+            f"Error: invalid agent name '{name}'. "
+            "Use 2-20 lowercase alphanumeric characters, hyphens, or underscores.",
+            "red",
+        )
+        sys.exit(1)
+
+    if not description:
+        cprint("Error: description cannot be empty.", "red")
+        sys.exit(1)
+
+    # --- Load config ---
+    cfg = load_config()
+    coord_name = cfg.get("coordinator", {}).get("name", "tarn")
+
+    # --- Check for name collision ---
+    existing_names = {a["name"].lower() for a in cfg.get("agents", [])}
+    existing_names.add(cfg.get("coordinator", {}).get("name", "").lower())
+    if name in existing_names:
+        cprint(f"Error: agent '{name}' already exists in hollow.config.json.", "red")
+        sys.exit(1)
+
+    # Also check for existing directories
+    if (AGENTS_DIR / name).exists():
+        cprint(f"Error: directory agents/{name}/ already exists. Remove it first.", "red")
+        sys.exit(1)
+
+    # --- Port ---
+    if args.port:
+        import socket
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            try:
+                s.bind(("127.0.0.1", args.port))
+            except OSError:
+                cprint(f"Error: port {args.port} is already in use.", "red")
+                sys.exit(1)
+        port = args.port
+    else:
+        port = find_next_port(cfg)
+
+    # --- Tools ---
+    if args.tools:
+        raw_tools = args.tools.strip()
+        if raw_tools.lower() == "all":
+            tools_list = ["all"]
+        else:
+            tools_list = [t.strip() for t in raw_tools.split(",") if t.strip()]
+    else:
+        tools_list = infer_tools(role, description)
+
+    # --- Soul.md frontmatter tools field ---
+    if tools_list == ["all"]:
+        frontmatter_tools = "[all]"
+    else:
+        frontmatter_tools = "[" + ", ".join(tools_list) + "]"
+
+    # --- Template variables ---
+    tmpl_vars = {
+        "agent_name": name,
+        "agent_role": role,
+        "agent_description": description,
+        "coordinator_name": coord_name,
+    }
+
+    # Generate file contents
+    soul_content = render_template(TEMPLATES_DIR / "soul.md", tmpl_vars)
+    # Override the default tools: [all] in the template with the resolved tools
+    soul_content = re.sub(
+        r"^tools: \[.*?\]$",
+        f"tools: {frontmatter_tools}",
+        soul_content,
+        flags=re.MULTILINE,
+    )
+
+    identity_content = render_template(TEMPLATES_DIR / "identity.md", tmpl_vars)
+
+    memory_files = generate_agent_memory_files(name, role, coord_name, cfg, timestamp)
+
+    # --- Summary ---
+    cprint(f"\nSpawning agent: {name}", "cyan")
+    cprint(f"  Role:        {role}", "")
+    cprint(f"  Description: {description}", "")
+    cprint(f"  Model:       {model}", "")
+    cprint(f"  Port:        {port}", "")
+    cprint(f"  Tools:       {tools_list}", "")
+    if dry_run:
+        cprint("\n[dry-run] Would create:", "yellow")
+        cprint(f"  agents/{name}/soul.md", "dim")
+        cprint(f"  agents/{name}/identity.md", "dim")
+        cprint(f"  agent-memory/{name}/memory.md", "dim")
+        cprint(f"  agent-memory/{name}/agents.md", "dim")
+        cprint(f"  agent-memory/{name}/sessions/", "dim")
+        cprint(f"  agent-memory/{name}/memory/", "dim")
+        cprint(f"  data/{name}/", "dim")
+        cprint(f"  hollow.config.json: add entry for {name} on port {port}", "dim")
+        cprint("\n[dry-run] No changes made.", "yellow")
+        return
+
+    # --- Create agents/<name>/ ---
+    identity_dir = AGENTS_DIR / name
+    identity_dir.mkdir(parents=True, exist_ok=True)
+    (identity_dir / "soul.md").write_text(soul_content)
+    (identity_dir / "identity.md").write_text(identity_content)
+    cprint(f"  Created: agents/{name}/soul.md", "green")
+    cprint(f"  Created: agents/{name}/identity.md", "green")
+
+    # --- Create agent-memory/<name>/ ---
+    mem_dir = MEMORY_DIR / name
+    mem_dir.mkdir(parents=True, exist_ok=True)
+    for filename, content in memory_files.items():
+        (mem_dir / filename).write_text(content)
+        cprint(f"  Created: agent-memory/{name}/{filename}", "green")
+    (mem_dir / "sessions").mkdir(exist_ok=True)
+    (mem_dir / "memory").mkdir(exist_ok=True)
+    cprint(f"  Created: agent-memory/{name}/sessions/", "green")
+    cprint(f"  Created: agent-memory/{name}/memory/", "green")
+
+    # --- Create data/<name>/ ---
+    data_dir = DATA_DIR / name
+    data_dir.mkdir(parents=True, exist_ok=True)
+    (data_dir / ".gitkeep").touch()
+    cprint(f"  Created: data/{name}/", "green")
+
+    # --- Update hollow.config.json ---
+    new_agent_entry: dict = {
+        "name": name,
+        "port": port,
+        "model": model,
+        "role": role,
+        "description": description,
+        "hail_keyword": name,
+        "tools": tools_list,
+    }
+    cfg["agents"].append(new_agent_entry)
+    write_config(cfg)
+    cprint(f"  Updated: hollow.config.json (port {port})", "green")
+
+    # --- Regenerate agents.md ---
+    generate_agents_md_bin = BIN_DIR / "generate-agents-md"
+    if generate_agents_md_bin.exists():
+        try:
+            subprocess.run(
+                [str(generate_agents_md_bin)],
+                cwd=str(HOLLOW_ROOT),
+                check=True,
+                capture_output=True,
+            )
+            cprint("  Refreshed: agent-memory/tarn/agents.md", "green")
+        except subprocess.CalledProcessError as e:
+            cprint(
+                f"  Warning: generate-agents-md failed: {e.stderr.decode().strip()}", "yellow"
+            )
+            cprint("  Run bin/generate-agents-md manually to refresh Tarn's roster.", "yellow")
+    else:
+        cprint("  Warning: bin/generate-agents-md not found — refresh agents.md manually.", "yellow")
+
+    # --- Discord channel (manual step) ---
+    cprint("\nDiscord channel setup (manual):", "cyan")
+    cprint(f"  The Discord bot does not auto-create channels (requires MANAGE_CHANNELS permission).", "yellow")
+    cprint(f"  Steps to add #{name} to Discord:", "")
+    cprint(f"    1. Create a text channel named #{name} in your Discord server", "dim")
+    cprint(f"    2. Create a webhook in that channel and copy the webhook URL", "dim")
+    cprint(f"    3. Add to hollow.config.json for agent '{name}':", "dim")
+    cprint(f'         "discord_channel": "{name}",', "dim")
+    cprint(f'         "discord_display_name": "{name.capitalize()}",', "dim")
+    cprint(f'         "discord_webhook": "<your-webhook-url>"', "dim")
+    cprint(f"    4. Restart Hollow for the routing to take effect", "dim")
+
+    # --- Final summary ---
+    cprint(f"\nAgent '{name}' created successfully.", "green")
+    cprint(f"  Identity:  agents/{name}/soul.md, agents/{name}/identity.md", "")
+    cprint(f"  Memory:    agent-memory/{name}/", "")
+    cprint(f"  Data:      data/{name}/", "")
+    cprint(f"  Config:    hollow.config.json (port {port})", "")
+    cprint(f"\nTo start immediately:", "cyan")
+    cprint(
+        f"  uv run python -m src.main "
+        f"--port {port} "
+        f"--identity-dir agents/{name} "
+        f"--memory-dir agent-memory/{name} "
+        f"--data-dir data/{name}",
+        "dim",
+    )
+    cprint(f"\nOr restart Hollow to include {name} in the full system:", "cyan")
+    cprint("  bash start.sh", "dim")
+    cprint(f"\nOnce running:", "cyan")
+    cprint(f"  hail {name} \"your task here\"", "dim")
+
+
+if __name__ == "__main__":
+    main()
