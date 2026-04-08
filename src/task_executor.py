@@ -5,23 +5,11 @@ and executes them via hail --detach + bin/wait-job.
 
 Atomic claim contract
 ---------------------
-When a task is claimed (set to in_progress), heartbeat_at and lease_expires_at
-are written in THE SAME API call as status=in_progress.  This eliminates the
-null-heartbeat window that existed when claim and first heartbeat were separate
-calls.  If the watchdog sees a task in_progress with a null or stale heartbeat_at
-it will reclaim it — writing them atomically prevents false reclaims immediately
-after claim.
-
-Optimistic lock dependency
---------------------------
-# TODO(optimistic-lock): The MC API lacks an atomic claim operation.
-# Currently claim is: PATCH /tasks/<id> {status: in_progress, heartbeat_at: now,
-# lease_expires_at: now+120min, locked_by: <executor>}.  If two executor instances
-# race, both may succeed and double-claim the same task.  The fix requires an MC
-# API endpoint: POST /tasks/<id>/claim?executor=<name> that succeeds only if
-# locked_by IS NULL and status IN ('ready', 'backlog').  Until that exists,
-# deploy exactly one task_executor instance per task pool.
-# Backlog task created: see Step 6 in implementation notes.
+When a task is claimed, task_executor uses POST /api/tasks/:id/claim — a single
+atomic MC transaction that sets status=in_progress, heartbeat_at, lease_expires_at,
+and locked_by simultaneously.  If two executor instances race, MC returns
+{"error": "already_claimed"} to the loser; claim_task() raises RuntimeError and
+the caller skips the task.  No double-claim window exists.
 
 Long-running task flow (long_running: true OR estimated duration > 5 min)
 --------------------------------------------------------------------------
@@ -101,26 +89,45 @@ def _run_mc(*args: str) -> dict:
 
 
 def claim_task(task_id: str) -> dict:
-    """Atomically claim a task: set in_progress + heartbeat_at + lease_expires_at.
+    """Atomically claim a task via POST /api/tasks/:id/claim.
 
-    Writes all three fields in a single PATCH call to eliminate the
-    null-heartbeat window between claim and first heartbeat tick.
+    MC's /claim endpoint sets status=in_progress, heartbeat_at, lease_expires_at,
+    and locked_by in a single atomic transaction.  If another executor has already
+    claimed the task the endpoint returns {"error": "already_claimed"} and this
+    function raises RuntimeError — the caller should skip this task.
 
-    Returns the updated task dict from MC.
+    Returns the updated task dict from MC on success.
     """
-    now = _now_iso()
-    lease = _lease_iso()
-    log.info(
-        "Claiming task %s: status=in_progress heartbeat_at=%s lease_expires_at=%s locked_by=%s",
-        task_id, now, lease, EXECUTOR_NAME,
-    )
-    return _run_mc(
-        "tasks", "update", task_id,
-        "--status=in_progress",
-        f"--heartbeat-at={now}",
-        f"--lease-expires-at={lease}",
-        f"--locked-by={EXECUTOR_NAME}",
-    )
+    import json, urllib.request, urllib.error
+    MC_BASE = os.environ.get("MC_BASE_URL", "http://localhost:3333")
+    MC_KEY  = os.environ.get("MC_API_KEY", "462f220e3c3f15324825a86373da874f92302bf6fc646e3330731468cc959c22")
+    url     = f"{MC_BASE}/api/tasks/{task_id}/claim"
+    body    = json.dumps({
+        "executor": EXECUTOR_NAME,
+        "lease_duration_secs": LEASE_DURATION_SECS,
+    }).encode()
+    req = urllib.request.Request(url, data=body, method="POST")
+    req.add_header("Content-Type", "application/json")
+    req.add_header("x-api-key", MC_KEY)
+    log.info("Claiming task %s via atomic /claim (executor=%s lease=%ds)", task_id, EXECUTOR_NAME, LEASE_DURATION_SECS)
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            return json.loads(resp.read().decode())
+    except urllib.error.HTTPError as e:
+        raw = e.read().decode() if e.fp else ""
+        try:
+            payload = json.loads(raw)
+        except Exception:
+            payload = {"error": raw}
+        if payload.get("error") == "already_claimed":
+            raise RuntimeError(
+                f"task {task_id} already claimed by {payload.get('locked_by', 'unknown')}"
+            )
+        raise RuntimeError(
+            f"MC /claim HTTP {e.code} for task {task_id}: {raw[:200]}"
+        )
+    except Exception as exc:
+        raise RuntimeError(f"MC /claim failed for task {task_id}: {exc}")
 
 
 def post_heartbeat(task_id: str) -> None:
@@ -189,6 +196,78 @@ def wait_job(agent: str, job_id: str, task_id: Optional[str] = None, max_minutes
     return result.returncode
 
 
+def _read_progress_context(notes: str, task_id: str) -> str:
+    """Read progress.json adjacent to the plan file (if present) and return
+    a formatted context block for injection into the agent prompt.
+
+    The plan file path is extracted from the task notes field using the
+    convention: ``plan_file: plans/foo.md`` (pipe-separated with other notes).
+    The progress file is expected at ``<plan_dir>/progress.json``.
+
+    Returns an empty string if no plan_file pointer is found or if no
+    progress.json exists yet (i.e., first run of the task).
+    """
+    import json as _json
+
+    if not notes or "plan_file:" not in notes:
+        return ""
+
+    # Parse plan_file from pipe-delimited notes string
+    plan_file_path: Optional[str] = None
+    for part in notes.split("|"):
+        part = part.strip()
+        if part.startswith("plan_file:"):
+            plan_file_path = part.split(":", 1)[1].strip()
+            break
+
+    if not plan_file_path:
+        return ""
+
+    # Resolve relative paths against HOLLOW_ROOT
+    plan_path = (
+        HOLLOW_ROOT / plan_file_path
+        if not Path(plan_file_path).is_absolute()
+        else Path(plan_file_path)
+    )
+    progress_path = plan_path.parent / "progress.json"
+
+    if not progress_path.exists():
+        log.debug("No progress.json found at %s for task %s — starting fresh", progress_path, task_id)
+        return ""
+
+    try:
+        progress = _json.loads(progress_path.read_text())
+    except Exception as exc:
+        log.warning("Could not read progress.json at %s: %s", progress_path, exc)
+        return ""
+
+    completed = progress.get("completed_subtasks", [])
+    failed = progress.get("failed_subtasks", [])
+    current = progress.get("current_subtask", "")
+    notes_map = progress.get("notes", {})
+
+    if not completed and not current:
+        return ""  # empty progress file — no useful context
+
+    lines = ["<progress_checkpoint>"]
+    lines.append(f"Task MC ID: {progress.get('task_mc_id', task_id)}")
+    if current:
+        lines.append(f"Current subtask: {current}")
+    if completed:
+        lines.append(f"Completed subtasks: {', '.join(completed)}")
+    if failed:
+        lines.append(f"Failed subtasks: {', '.join(failed)}")
+    if notes_map:
+        lines.append("Notes per subtask:")
+        for k, v in notes_map.items():
+            lines.append(f"  {k}: {v}")
+    lines.append("")
+    lines.append("Resume from the current subtask. Skip all completed subtasks.")
+    lines.append("</progress_checkpoint>")
+
+    return "\n".join(lines)
+
+
 def execute_task(task: dict) -> None:
     """Execute a single MC task.
 
@@ -204,8 +283,15 @@ def execute_task(task: dict) -> None:
     notes = task.get("notes", "")
     agent = task.get("assigned_to", EXECUTOR_NAME)
 
-    # ── Atomic claim: sets in_progress + heartbeat_at + lease_expires_at in one call ──
-    claim_task(task_id)
+    # ── Atomic claim via POST /api/tasks/:id/claim ──────────────────────────────
+    # MC's /claim endpoint is transactional: succeeds only if the task is
+    # unclaimed (locked_by IS NULL, status IN ready/backlog).  If another
+    # executor races us, claim_task() raises RuntimeError — we skip the task.
+    try:
+        claim_task(task_id)
+    except RuntimeError as exc:
+        log.warning("Skipping task %s — claim failed: %s", task_id, exc)
+        return
 
     # Detect if this is a recovery scenario (fire_job_id in notes)
     fire_job_id: Optional[str] = None
@@ -219,6 +305,14 @@ def execute_task(task: dict) -> None:
 
     is_long_running = "long_running" in tags or fire_job_id is not None
     prompt = f"{title}\n\n{description}".strip()
+
+    # ── Progress checkpoint injection (Phase 3b) ─────────────────────────────
+    # If the task notes contain a plan_file: pointer, read the adjacent
+    # progress.json and inject current state into the prompt so the agent
+    # resumes from the correct subtask rather than restarting from scratch.
+    progress_context = _read_progress_context(notes, task_id)
+    if progress_context:
+        prompt = f"{prompt}\n\n{progress_context}"
 
     if is_long_running:
         _execute_long_task(task_id, agent, prompt, fire_job_id=fire_job_id)

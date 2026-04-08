@@ -15,6 +15,8 @@ Options:
                              Results in chat_id "<agent>_<user>". Defaults to "_main".
     --context TEXT           Context string injected into the agent's system prompt,
                              giving the sub-agent background from the delegating session.
+    --model MODEL            Override the model for this specific call (e.g. opus, sonnet).
+                             The agent uses its configured default if not specified.
     --detach                 Call /fire instead of /ask; print job_id and exit immediately.
     --poll JOB_ID            Poll /result/<job_id> every 5s until done; exit 0 on success,
                              1 on error. Agent name is still required for URL resolution.
@@ -36,6 +38,28 @@ HOLLOW_ROOT = Path(__file__).parent.parent.resolve()
 CONFIG_PATH = HOLLOW_ROOT / "hollow.config.json"
 TIMEOUT = 300
 POLL_INTERVAL = 10  # seconds between /result polls
+
+# Short aliases → full Anthropic model IDs.
+# Add new aliases here as models are released.
+_MODEL_ALIASES: dict[str, str] = {
+    "opus":   "claude-opus-4-6",
+    "sonnet": "claude-sonnet-4-6",
+    "haiku":  "claude-haiku-4-5",
+}
+
+
+def _resolve_model(model_arg: str) -> str:
+    """Expand short model aliases to full model IDs.
+
+    Passes through any value that already looks like a full model ID
+    (contains a hyphen and is not a known alias).
+    """
+    if not model_arg:
+        return model_arg
+    lower = model_arg.lower()
+    if lower in _MODEL_ALIASES:
+        return _MODEL_ALIASES[lower]
+    return model_arg
 
 
 def load_config() -> dict:
@@ -193,6 +217,12 @@ def main():
         help="Context string to inject into the agent's system prompt",
     )
     parser.add_argument(
+        "--model",
+        default="",
+        metavar="MODEL",
+        help="Override model for this call (e.g. opus, sonnet, haiku). Agent uses its default if not set.",
+    )
+    parser.add_argument(
         "--detach",
         action="store_true",
         help="Call /fire instead of /ask; print job_id and exit immediately",
@@ -252,6 +282,8 @@ def main():
     payload_data: dict = {"message": task, "chat_id": chat_id}
     if args.context:
         payload_data["context"] = args.context
+    if args.model:
+        payload_data["model"] = _resolve_model(args.model)
 
     if args.detach:
         # /fire mode
