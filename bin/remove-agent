@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# remove-agent — stub (not yet implemented)
+#
+# When implemented, this will tear down a Hollow agent: remove its directories,
+# drop its hollow.config.json entry, and regenerate agents.md.
+
+cat >&2 <<'MSG'
+remove-agent is not yet implemented.
+
+To remove an agent manually:
+  1. Stop the agent process (kill its port or use Hollow's process manager)
+  2. Remove its entry from hollow.config.json  ("agents": [...])
+  3. Delete agents/<name>/
+  4. Delete agent-memory/<name>/
+  5. Delete data/<name>/  (review contents first — this may include useful state)
+  6. Run bin/generate-agents-md to refresh Tarn's roster
+  7. Restart Hollow (bash start.sh) for routing changes to take effect
+MSG
+
+exit 1
