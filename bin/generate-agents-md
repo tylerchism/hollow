@@ -1,0 +1,130 @@
+#!/usr/bin/env python3
+"""Generate the specialist-agents table in agent-memory/tarn/agents.md from hollow.config.json.
+
+Reads the agents array in hollow.config.json and rewrites the markdown table
+between <!-- AGENT_ROSTER_START --> and <!-- AGENT_ROSTER_END --> markers
+in agent-memory/tarn/agents.md.
+
+Usage:
+    bin/generate-agents-md [--dry-run]
+
+Options:
+    --dry-run   Print the generated table to stdout without writing to disk.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from pathlib import Path
+
+HOLLOW_ROOT = Path(__file__).parent.parent.resolve()
+CONFIG_PATH = HOLLOW_ROOT / "hollow.config.json"
+AGENTS_MD_PATH = HOLLOW_ROOT / "agent-memory" / "tarn" / "agents.md"
+
+ROSTER_START_MARKER = "<!-- AGENT_ROSTER_START -->"
+ROSTER_END_MARKER = "<!-- AGENT_ROSTER_END -->"
+
+
+def load_config() -> dict:
+    if not CONFIG_PATH.exists():
+        print(f"Error: hollow.config.json not found at {CONFIG_PATH}", file=sys.stderr)
+        sys.exit(1)
+    try:
+        return json.loads(CONFIG_PATH.read_text())
+    except (json.JSONDecodeError, OSError) as e:
+        print(f"Error: could not parse hollow.config.json: {e}", file=sys.stderr)
+        sys.exit(1)
+
+
+def build_table(cfg: dict) -> str:
+    """Build the markdown table from the agents array in config."""
+    rows: list[tuple[str, str, str]] = []
+
+    # Include coordinator in table if present
+    coordinator = cfg.get("coordinator", {})
+    if coordinator.get("name"):
+        name = coordinator["name"].capitalize()
+        keyword = coordinator["name"].lower()
+        role = coordinator.get("role", coordinator.get("description", ""))
+        rows.append((name, keyword, role))
+
+    for agent in cfg.get("agents", []):
+        name = agent.get("name", "")
+        keyword = agent.get("hail_keyword", name).lower()
+        role = agent.get("role", agent.get("description", ""))
+        if name:
+            rows.append((name.capitalize(), keyword, role))
+
+    lines: list[str] = [
+        "| Name | Call with | Role |",
+        "|------|-----------|------|",
+    ]
+    for name, keyword, role in rows:
+        lines.append(f"| {name} | `hail {keyword}` | {role} |")
+
+    return "\n".join(lines)
+
+
+def generate(dry_run: bool = False) -> None:
+    cfg = load_config()
+    table = build_table(cfg)
+
+    new_block = (
+        f"{ROSTER_START_MARKER}\n"
+        f"{table}\n"
+        f"{ROSTER_END_MARKER}"
+    )
+
+    if dry_run:
+        print(new_block)
+        return
+
+    if not AGENTS_MD_PATH.exists():
+        print(f"Error: agents.md not found at {AGENTS_MD_PATH}", file=sys.stderr)
+        sys.exit(1)
+
+    content = AGENTS_MD_PATH.read_text()
+
+    start_idx = content.find(ROSTER_START_MARKER)
+    end_idx = content.find(ROSTER_END_MARKER)
+
+    if start_idx == -1 or end_idx == -1:
+        print(
+            f"Error: markers not found in {AGENTS_MD_PATH}\n"
+            f"  Expected: {ROSTER_START_MARKER} ... {ROSTER_END_MARKER}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    if start_idx > end_idx:
+        print(
+            f"Error: {ROSTER_START_MARKER} appears after {ROSTER_END_MARKER} in {AGENTS_MD_PATH}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    end_of_end = end_idx + len(ROSTER_END_MARKER)
+    new_content = content[:start_idx] + new_block + content[end_of_end:]
+
+    AGENTS_MD_PATH.write_text(new_content)
+    print(f"Updated {AGENTS_MD_PATH}")
+    print(f"  {len(cfg.get('agents', []))} specialist agents + coordinator written to roster table.")
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Regenerate the specialist-agents table in agent-memory/tarn/agents.md from hollow.config.json."
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print the generated table to stdout without writing to disk.",
+    )
+    args = parser.parse_args()
+    generate(dry_run=args.dry_run)
+
+
+if __name__ == "__main__":
+    main()
