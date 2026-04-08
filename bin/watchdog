@@ -25,6 +25,7 @@ import sys
 import time
 import urllib.request
 import urllib.error
+import urllib.parse
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -46,6 +47,10 @@ DISCORD_ALERT_CHANNEL = "tarn"
 # Maximum age (seconds) of a stale lock before we override it.
 # This should exceed the worst-case single-run time (9 agents × 5s timeout + 15s restart wait).
 LOCK_MAX_AGE_SEC = 180
+
+# Mission Control API settings (read from env or defaults matching bin/mc)
+MC_BASE_URL = os.environ.get("MC_BASE_URL", "http://localhost:3333")
+MC_API_KEY  = os.environ.get("MC_API_KEY", "462f220e3c3f15324825a86373da874f92302bf6fc646e3330731468cc959c22")
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -292,6 +297,125 @@ def try_restart(name: str, port: int, discord_token: Optional[str] = None) -> bo
         return False
 
 
+# ── Stale lease reset ─────────────────────────────────────────────────────────
+
+def mc_api(method: str, path: str, data=None, params=None):
+    """Make a request to the Mission Control API. Returns parsed JSON or None on error."""
+    url = f"{MC_BASE_URL}{path}"
+    if params:
+        url += "?" + urllib.parse.urlencode(params)
+    body = json.dumps(data).encode() if data is not None else None
+    req = urllib.request.Request(url, data=body, method=method)
+    req.add_header("Content-Type", "application/json")
+    req.add_header("x-api-key", MC_API_KEY)
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return json.loads(resp.read().decode())
+    except urllib.error.HTTPError as e:
+        body_text = e.read().decode() if e.fp else ""
+        log(f"  MC API HTTP {e.code} {method} {path}: {body_text[:200]}")
+        return None
+    except urllib.error.URLError as e:
+        log(f"  MC API connection error {method} {path}: {e.reason}")
+        return None
+    except Exception as e:
+        log(f"  MC API error {method} {path}: {e}")
+        return None
+
+
+def reset_stale_leases(cfg: dict) -> int:
+    """
+    Query MC for in_progress tasks with expired leases and reset them to ready.
+
+    Uses hollow.config.json watchdog.heartbeat_interval_minutes as the grace period:
+    a task whose lease_expires_at is in the past has not received a heartbeat within
+    the expected window, meaning task_executor likely died mid-task.
+
+    Returns the count of tasks reset.
+    """
+    watchdog_cfg = cfg.get("watchdog", {})
+    # We don't add extra grace beyond what lease_expires_at already encodes.
+    # If the lease is expired it is definitively stale.
+
+    tasks = mc_api("GET", "/api/tasks", params={"status": "in_progress"})
+    if tasks is None:
+        log("  stale-lease: could not reach MC — skipping lease reset")
+        return 0
+    if not isinstance(tasks, list):
+        log(f"  stale-lease: unexpected tasks response type: {type(tasks)}")
+        return 0
+
+    now = datetime.now(timezone.utc)
+    reset_count = 0
+
+    for task in tasks:
+        task_id    = task.get("id", "?")
+        title      = task.get("title", "")[:60]
+        locked_by  = task.get("locked_by") or "unknown"
+        lease_str  = task.get("lease_expires_at")
+
+        if not lease_str:
+            # No lease set — not a task_executor-managed task; skip
+            continue
+
+        try:
+            # Parse ISO8601; Python's fromisoformat handles trailing Z in 3.11+
+            # For older Pythons strip Z and append +00:00
+            lease_str_norm = lease_str.replace("Z", "+00:00")
+            lease_expires = datetime.fromisoformat(lease_str_norm)
+        except ValueError:
+            log(f"  stale-lease: could not parse lease_expires_at '{lease_str}' for task {task_id}")
+            continue
+
+        if lease_expires >= now:
+            # Lease still valid
+            continue
+
+        age_minutes = (now - lease_expires).total_seconds() / 60
+        log(f"  stale-lease: task {task_id} ({title!r}) — lease expired {age_minutes:.1f}m ago (locked_by={locked_by}), resetting to ready")
+
+        result = mc_api(
+            "PATCH",
+            f"/api/tasks/{task_id}",
+            data={
+                "status": "ready",
+                "locked_by": None,
+                "lease_expires_at": None,
+                "heartbeat_at": None,
+            },
+        )
+        if result is None:
+            log(f"  stale-lease: PATCH failed for task {task_id} — will retry next cycle")
+            continue
+
+        reset_count += 1
+
+        # Emit activity log entry so there is a record of the reset
+        mc_api(
+            "POST",
+            "/api/agent-activity",
+            data={
+                "agent": "watchdog",
+                "action": f"stale-lease reset: {title!r} (task {task_id}) was in_progress with expired lease (locked_by={locked_by}, expired {age_minutes:.1f}m ago) — reset to ready",
+                "action_type": "watchdog.stale_lease_reset",
+                "payload": {
+                    "task_id": task_id,
+                    "task_title": task.get("title", ""),
+                    "locked_by": locked_by,
+                    "lease_expired_at": lease_str,
+                    "expired_minutes_ago": round(age_minutes, 1),
+                },
+            },
+        )
+
+    if reset_count:
+        log(f"  stale-lease: reset {reset_count} stale task(s) to ready")
+    else:
+        log("  stale-lease: no stale leases found")
+
+    return reset_count
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def acquire_lock() -> bool:
@@ -365,6 +489,12 @@ def _main(args) -> None:
 
     if not discord_token:
         log("ERROR: DISCORD_BOT_TOKEN not found — alerts will not be sent")
+
+    # ── Stale lease reset ──────────────────────────────────────────────────────
+    # Check for in_progress tasks whose lease has expired (task_executor died mid-task).
+    # This runs unconditionally on every watchdog sweep, before the agent health checks.
+    log("Checking for stale MC leases...")
+    reset_stale_leases(cfg)
 
     # Build agent list from config
     agents = [{"name": cfg["coordinator"]["name"], "port": cfg["coordinator"]["port"]}]
