@@ -192,27 +192,62 @@ async def _post_to_agent(port: int, message: str, chat_id: str) -> str | None:
         return None
 
 
-async def _send_webhook(webhook_url: str, text: str, username: str) -> None:
-    """POST a message to a Discord webhook as the given username."""
+async def _send_webhook(webhook_url: str, text: str, username: str) -> bool:
+    """POST a message to a Discord webhook as the given username.
+
+    Returns True if all chunks were delivered successfully, False if any chunk
+    failed (e.g. 403 Forbidden — webhook deleted or invalid).
+    """
     import asyncio
     loop = asyncio.get_running_loop()
+    _success = True
 
-    def _post_chunk(chunk: str) -> None:
+    def _post_chunk(chunk: str) -> bool:
         payload = json.dumps({"content": chunk, "username": username}).encode()
         req = urllib.request.Request(webhook_url, data=payload, method="POST")
         req.add_header("Content-Type", "application/json")
         try:
             with urllib.request.urlopen(req, timeout=15) as resp:
                 _ = resp.read()
+            return True
         except urllib.error.HTTPError as exc:
             log.error("Webhook POST failed: %s %s", exc.code, exc.reason)
+            return False
         except Exception:
             log.exception("Webhook POST error")
+            return False
 
     text = str(text)
     chunks = _split_for_discord(text) if text else [""]
     for chunk in chunks:
-        await loop.run_in_executor(None, _post_chunk, chunk)
+        ok = await loop.run_in_executor(None, _post_chunk, chunk)
+        if not ok:
+            _success = False
+    return _success
+
+
+async def _check_webhook_liveness(webhook_url: str) -> bool:
+    """HEAD/GET the webhook URL to verify it is alive.
+
+    Returns True if the webhook responds with a 2xx status, False otherwise.
+    Used at startup to warn about dead webhooks without raising.
+    """
+    import asyncio
+    loop = asyncio.get_running_loop()
+
+    def _do_check() -> bool:
+        try:
+            req = urllib.request.Request(webhook_url, method="GET")
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                return 200 <= resp.status < 300
+        except urllib.error.HTTPError as exc:
+            log.warning("Webhook liveness check failed: %s %s (url=%s)", exc.code, exc.reason, webhook_url)
+            return False
+        except Exception as exc:
+            log.warning("Webhook liveness check error: %s (url=%s)", exc, webhook_url)
+            return False
+
+    return await loop.run_in_executor(None, _do_check)
 
 
 class DiscordBot:
@@ -477,13 +512,24 @@ class DiscordBot:
         self._write_active_channel(channel_id, channel_name=channel_name)
 
         async def _send_reply(text: str) -> None:
-            """Deliver *text* — via webhook if configured, otherwise direct."""
+            """Deliver *text* — via webhook if configured, otherwise direct.
+
+            If the webhook POST fails (e.g. 403 — URL deleted/invalid), falls
+            back to posting directly via the bot connection and logs a warning.
+            """
             if webhook_url:
-                await _send_webhook(
+                delivered = await _send_webhook(
                     webhook_url=webhook_url,
                     text=text,
                     username=webhook_display_name,
                 )
+                if not delivered:
+                    log.warning(
+                        "Discord: webhook delivery failed (url=%r) — "
+                        "falling back to bot channel send",
+                        webhook_url,
+                    )
+                    await self._send_chunked(message.channel, text)
             else:
                 await self._send_chunked(message.channel, text)
 
@@ -615,6 +661,29 @@ class DiscordBot:
             )
             for guild in client.guilds:
                 log.info("  Guild: %s (id=%s)", guild.name, guild.id)
+
+            # Startup webhook liveness check: warn (not error) for any dead
+            # webhooks so they can be regenerated before messages start flowing.
+            for ch, r in self._channel_routing.items():
+                webhook_url = r.get("webhook_url", "")
+                if r.get("port") and webhook_url:
+                    alive = await _check_webhook_liveness(webhook_url)
+                    if not alive:
+                        log.warning(
+                            "Discord: webhook for channel #%s (agent '%s') "
+                            "appears dead at startup — deliveries will fall back "
+                            "to bot channel send. Regenerate the webhook and "
+                            "update hollow.config.json discord_webhook.",
+                            ch,
+                            r["name"],
+                        )
+                    else:
+                        log.info(
+                            "Discord: webhook for channel #%s (agent '%s') OK",
+                            ch,
+                            r["name"],
+                        )
+
             self._ready_event.set()
 
         @client.event
@@ -739,7 +808,7 @@ class DiscordBot:
             # either call agent.reply() directly (self-route) or POST to the
             # remote agent's /ask endpoint, then deliver via webhook.
             routing = self._channel_routing.get(channel_name)
-            if routing and routing.get("port") and routing.get("webhook_url"):
+            if routing and routing.get("port"):
                 log.info(
                     "Discord: routing #%s message to agent '%s' (port=%d)",
                     channel_name,
@@ -785,11 +854,24 @@ class DiscordBot:
                         chat_id=_channel_id,
                     )
                     if response and response.strip():
-                        await _send_webhook(
-                            webhook_url=_routing["webhook_url"],
-                            text=response,
-                            username=_routing["display_name"],
-                        )
+                        webhook_url = _routing.get("webhook_url", "")
+                        delivered = False
+                        if webhook_url:
+                            delivered = await _send_webhook(
+                                webhook_url=webhook_url,
+                                text=response,
+                                username=_routing["display_name"],
+                            )
+                        if not delivered:
+                            # Webhook missing or returned an error (e.g. 403) —
+                            # fall back to posting via Tarn's own bot connection.
+                            log.warning(
+                                "Discord: webhook delivery failed for agent '%s' "
+                                "(url=%r) — falling back to bot channel send",
+                                _routing["name"],
+                                webhook_url,
+                            )
+                            await self.send_message(_channel_id, response)
                     else:
                         log.warning(
                             "Discord: routed agent '%s' returned empty response",

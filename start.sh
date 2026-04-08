@@ -45,12 +45,36 @@ def port_in_use(port):
             return False
 
 
-def launch(name, port, identity_dir, memory_dir, data_dir, model=None):
+_TOOL_NAME_MAP = {
+    "bash": "Bash",
+    "read": "Read",
+    "write": "Write",
+    "edit": "Edit",
+    "glob": "Glob",
+    "grep": "Grep",
+    "web_search": "WebSearch",
+    "web_fetch": "WebFetch",
+    "agent": "Agent",
+}
+
+
+def normalize_tools(tools_list):
+    """Convert config tool names (lowercase) to SDK tool names (capitalized)."""
+    if not tools_list or tools_list == ["all"]:
+        return ""
+    result = []
+    for t in tools_list:
+        sdk_name = _TOOL_NAME_MAP.get(t.lower(), t)
+        result.append(sdk_name)
+    return ",".join(result)
+
+
+def launch(name, port, identity_dir, memory_dir, data_dir, model=None, tools=None):
     if port_in_use(port):
         print(f"  WARNING: port {port} already in use — {name} may already be running")
         return None
     cmd = [
-        "uv", "run", "python", "-m", "src.main",
+        "/home/tchism/.local/bin/uv", "run", "python", "-m", "src.main",
         "--port", str(port),
         "--identity-dir", str(identity_dir),
         "--memory-dir", str(memory_dir),
@@ -60,6 +84,9 @@ def launch(name, port, identity_dir, memory_dir, data_dir, model=None):
     env["USER_TIMEZONE"] = user_tz
     if model:
         env["PRIMARY_MODEL"] = model
+    allowed_tools_str = normalize_tools(tools or [])
+    if allowed_tools_str:
+        env["ALLOWED_TOOLS"] = allowed_tools_str
     log_file = hollow_root / "data" / f"{name}.log"
     log_file.parent.mkdir(parents=True, exist_ok=True)
     with open(log_file, "a") as lf:
@@ -99,7 +126,8 @@ if not coord_memory.exists():
 coord_data = hollow_root / "data" / coord_name
 coord_data.mkdir(parents=True, exist_ok=True)
 print(f"Coordinator: {coord_name}")
-p = launch(coord_name, coord_port, coord_identity, coord_memory, coord_data, model=coord_model)
+coord_tools = coord.get("tools", [])
+p = launch(coord_name, coord_port, coord_identity, coord_memory, coord_data, model=coord_model, tools=coord_tools)
 if p:
     procs.append(p)
 time.sleep(1)
@@ -110,6 +138,7 @@ for agent in agents:
     name = agent["name"]
     port = agent["port"]
     model = agent.get("model")
+    tools = agent.get("tools", [])
     identity_dir = hollow_root / "agents" / name
     memory_dir = hollow_root / "agent-memory" / name
 
@@ -122,7 +151,7 @@ for agent in agents:
 
     data_dir = hollow_root / "data" / name
     data_dir.mkdir(parents=True, exist_ok=True)
-    p = launch(name, port, identity_dir, memory_dir, data_dir, model=model)
+    p = launch(name, port, identity_dir, memory_dir, data_dir, model=model, tools=tools)
     if p:
         procs.append(p)
 

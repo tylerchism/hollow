@@ -47,6 +47,11 @@ class Config:
     # that share a conversation channel (e.g. Flux on #trader-bot).
     startup_notification: bool = True
 
+    # Bounded tool set for this agent.  If empty, NATIVE_TOOLS (all tools)
+    # is used.  Populated from ALLOWED_TOOLS env var (comma-separated SDK
+    # tool names, e.g. "Bash,Read,Glob,Grep").
+    allowed_tools: list = field(default_factory=list)
+
 
 def load_config(env_path: Path | None = None) -> Config:
     """Load configuration from env vars and .env file.
@@ -78,5 +83,18 @@ def load_config(env_path: Path | None = None) -> Config:
         discord_channel_name=os.getenv("DISCORD_CHANNEL_NAME", "tarn"),
         discord_tarn_channel_id=int(os.getenv("DISCORD_TARN_CHANNEL_ID", "0")),
         startup_notification=os.getenv("STARTUP_NOTIFICATION", "true").strip().lower() not in ("false", "0", "no"),
+        allowed_tools=_parse_allowed_tools(os.getenv("ALLOWED_TOOLS", "")),
     )
     return config
+
+
+def _parse_allowed_tools(raw: str) -> list:
+    """Parse a comma-separated ALLOWED_TOOLS string into a list.
+
+    Empty string → [] (means: no restriction, use NATIVE_TOOLS default).
+    "all" → [] (same — caller treats empty as unrestricted).
+    Otherwise splits on commas, strips whitespace, drops empty tokens.
+    """
+    if not raw or raw.strip().lower() == "all":
+        return []
+    return [t.strip() for t in raw.split(",") if t.strip()]

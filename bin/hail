@@ -58,6 +58,38 @@ _MODEL_ALIASES: dict[str, str] = {
 }
 
 
+_TOOL_NAME_MAP: dict[str, str] = {
+    "bash": "Bash",
+    "read": "Read",
+    "write": "Write",
+    "edit": "Edit",
+    "glob": "Glob",
+    "grep": "Grep",
+    "web_search": "WebSearch",
+    "web_fetch": "WebFetch",
+    "agent": "Agent",
+}
+
+
+def _normalize_tools(tools_arg: str) -> list[str]:
+    """Parse --allowed-tools value into a list of SDK tool names.
+
+    Accepts comma-separated names in either config style (bash, web_search) or
+    SDK style (Bash, WebSearch). Returns [] for "all" or empty string.
+    """
+    raw = tools_arg.strip()
+    if not raw or raw.lower() == "all":
+        return []
+    result = []
+    for t in raw.split(","):
+        t = t.strip()
+        if not t:
+            continue
+        sdk_name = _TOOL_NAME_MAP.get(t.lower(), t)
+        result.append(sdk_name)
+    return result
+
+
 def _resolve_model(model_arg: str) -> str:
     """Expand short model aliases to full model IDs.
 
@@ -105,6 +137,7 @@ def load_agents(cfg: dict | None = None) -> dict[str, dict]:
             "ask_url": f"{base}/ask",
             "fire_url": f"{base}/fire",
             "result_base": base,
+            "tools": coordinator.get("tools", []),
         }
 
     for agent in cfg.get("agents", []):
@@ -116,6 +149,7 @@ def load_agents(cfg: dict | None = None) -> dict[str, dict]:
                 "ask_url": f"{base}/ask",
                 "fire_url": f"{base}/fire",
                 "result_base": base,
+                "tools": agent.get("tools", []),
             }
 
     return agents
@@ -363,6 +397,16 @@ def main():
             "before dispatching. Injects worktree path into agent context."
         ),
     )
+    parser.add_argument(
+        "--allowed-tools",
+        default=None,
+        metavar="TOOLS",
+        help=(
+            "Comma-separated tool names for this call (e.g. 'Bash,Read,Glob,Grep'). "
+            "Overrides the agent's configured allowlist. Pass 'all' to disable restriction. "
+            "If omitted, uses the agent's tools entry from hollow.config.json."
+        ),
+    )
 
     if len(sys.argv) < 2:
         parser.print_help()
@@ -432,6 +476,21 @@ def main():
         payload_data["context"] = combined_context
     if args.model:
         payload_data["model"] = _resolve_model(args.model)
+
+    # ── allowed_tools resolution ───────────────────────────────────────────────
+    # Priority: --allowed-tools flag > agent config tools > (no override, server decides)
+    if args.allowed_tools is not None:
+        # Explicit override from CLI
+        tool_list = _normalize_tools(args.allowed_tools)
+        if tool_list:
+            payload_data["allowed_tools"] = tool_list
+        # else "all" → omit field, server treats as unrestricted
+    else:
+        # Auto-populate from hollow.config.json tools entry
+        cfg_tools = agent_urls.get("tools", [])
+        if cfg_tools and cfg_tools != ["all"]:
+            normalized = [_TOOL_NAME_MAP.get(t.lower(), t) for t in cfg_tools]
+            payload_data["allowed_tools"] = normalized
 
     if args.detach:
         # /fire mode

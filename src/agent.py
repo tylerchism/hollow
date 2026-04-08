@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import time
 from typing import TYPE_CHECKING
 
@@ -100,8 +101,11 @@ class PersistentConversationHistory:
         )
         await self._db.commit()
 
+    # Maximum number of messages to load per session (lean-mode: reduces token burn)
+    MAX_MESSAGES = 12
+
     async def get_messages(self, chat_id: str) -> list[dict]:
-        """Load active messages for a chat_id, applying char budget (drop oldest first)."""
+        """Load active messages for a chat_id, applying char budget and message count cap."""
         cursor = await self._db.execute(
             "SELECT role, content FROM chat_sessions WHERE chat_id = ? AND session_key = '' ORDER BY created_at ASC",
             (chat_id,),
@@ -112,10 +116,12 @@ class PersistentConversationHistory:
         if not messages:
             return messages
 
-        # Walk from newest to oldest, keep what fits in budget
+        # Walk from newest to oldest, keep what fits in budget AND message count cap
         result = []
         total_chars = 0
         for msg in reversed(messages):
+            if len(result) >= self.MAX_MESSAGES:
+                break
             msg_chars = len(msg["content"])
             if total_chars + msg_chars > self.char_budget and result:
                 break
@@ -282,6 +288,7 @@ class AgentRunner:
         is_main_session: bool = True,
         context_injection: str = "",
         allowed_tools: list[str] | None = None,
+        model_override: str = "",
     ) -> str:
         """Process a user message and return the assistant's response.
 
@@ -295,6 +302,9 @@ class AgentRunner:
             allowed_tools: Override the default NATIVE_TOOLS allowlist for this
                 call.  Pass a restricted list to block dangerous tools (e.g.
                 exclude Bash during read-only startup sequences).
+            model_override: If non-empty, use this model instead of the agent's
+                configured default for this specific call. Allows per-call model
+                selection (e.g. opus for deep research, haiku for quick checks).
         """
         # 0. Run compaction if history is too large (before adding new message)
         try:
@@ -331,12 +341,37 @@ class AgentRunner:
                 "message": {"role": "user", "content": prompt},
             }
 
+        _hollow_bin = os.path.expanduser("~/git/hollow/bin")
+        _current_path = os.environ.get("PATH", "/usr/bin:/bin")
+        _agent_path = (
+            _current_path
+            if _hollow_bin in _current_path.split(":")
+            else f"{_hollow_bin}:{_current_path}"
+        )
+        # Resolve model: per-call override > agent config default
+        _effective_model = model_override.strip() if model_override else self._model_id()
+        if model_override:
+            log.info("reply: using model override %r for chat_id=%s", _effective_model, chat_id)
+
+        # Resolve effective tool list:
+        #   1. Per-call override (allowed_tools argument)
+        #   2. Agent config restriction (config.allowed_tools, set from ALLOWED_TOOLS env)
+        #   3. Full NATIVE_TOOLS (no restriction)
+        _cfg_tools = getattr(self.config, "allowed_tools", [])
+        if allowed_tools is not None:
+            _effective_tools = allowed_tools
+        elif _cfg_tools:
+            _effective_tools = _cfg_tools
+        else:
+            _effective_tools = NATIVE_TOOLS
+
         options = ClaudeCodeOptions(
             system_prompt=context,
             max_turns=MAX_TOOL_ROUNDS,
-            model=self._model_id(),
+            model=_effective_model,
             permission_mode="bypassPermissions",
-            allowed_tools=allowed_tools if allowed_tools is not None else NATIVE_TOOLS,
+            allowed_tools=_effective_tools,
+            env={"PATH": _agent_path},
         )
 
         reply_text = ""

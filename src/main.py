@@ -40,6 +40,37 @@ def _fire_job_id() -> str:
     return "fire_" + uuid.uuid4().hex[:8]
 
 
+def _resolve_allowed_tools(
+    payload_tools: object,
+    agent: "AgentRunner",
+) -> "list[str] | None":
+    """Resolve the effective allowed_tools list for a request.
+
+    Priority (highest to lowest):
+      1. payload_tools  — list passed in the HTTP request body (hail --allowed-tools)
+      2. agent.config.allowed_tools — loaded from ALLOWED_TOOLS env var at startup
+      3. None — means agent.reply() uses its NATIVE_TOOLS default
+
+    A payload value of ["all"] or an empty config list both mean "no restriction".
+    Tool names in the payload are expected to be SDK-style (capitalized, e.g. "Bash").
+    """
+    # 1. Payload override
+    if payload_tools is not None:
+        if isinstance(payload_tools, list):
+            if payload_tools and payload_tools != ["all"]:
+                return [str(t) for t in payload_tools]
+        # payload present but empty or ["all"] → unrestricted
+        return None
+
+    # 2. Agent config
+    cfg_tools = getattr(agent.config, "allowed_tools", [])
+    if cfg_tools:
+        return cfg_tools  # already parsed SDK-style names
+
+    # 3. Default: no restriction
+    return None
+
+
 def _sweep_stale_fire_jobs() -> None:
     """Remove fire job records older than _FIRE_JOB_TTL_SECS from _fire_jobs."""
     now = _time_module.time()
@@ -179,6 +210,9 @@ def make_api_app(
         chat_id = data.get("chat_id", "api")
         is_main_session = data.get("is_main_session", True)
         context_injection = data.get("context", "").strip()
+        model_override = data.get("model", "").strip()
+        # allowed_tools: payload override > agent config > NATIVE_TOOLS default
+        allowed_tools = _resolve_allowed_tools(data.get("allowed_tools"), agent)
 
         try:
             response = await agent.reply(
@@ -186,6 +220,8 @@ def make_api_app(
                 chat_id=chat_id,
                 is_main_session=is_main_session,
                 context_injection=context_injection,
+                model_override=model_override,
+                allowed_tools=allowed_tools,
             )
             return web.json_response({"response": response})
         except Exception as e:
@@ -291,6 +327,9 @@ def make_api_app(
         context_injection = data.get("context", "").strip()
         idempotency_key = data.get("idempotency_key", "").strip()
         result_channel = data.get("result_channel", "").strip()
+        model_override = data.get("model", "").strip()
+        # allowed_tools: payload override > agent config > NATIVE_TOOLS default
+        allowed_tools = _resolve_allowed_tools(data.get("allowed_tools"), agent)
 
         # Idempotency: return existing job if key matches
         if idempotency_key:
@@ -353,6 +392,8 @@ def make_api_app(
                     chat_id=chat_id,
                     is_main_session=False,
                     context_injection=context_injection,
+                    model_override=model_override,
+                    allowed_tools=allowed_tools,
                 ),
                 name=f"fire_{job_id}",
             )
@@ -381,6 +422,8 @@ def make_api_app(
                     chat_id=chat_id,
                     is_main_session=False,
                     context_injection=context_injection,
+                    model_override=model_override,
+                    allowed_tools=allowed_tools,
                 ),
                 name=f"fire_{job_id}",
             )
@@ -544,6 +587,68 @@ def setup_scheduler(
             timezone=tz,
         )
 
+        # ── Pure-script cron (no LLM at all) ─────────────────────────────────
+        # If type == "script", run the script_command field directly as a shell
+        # command.  Falls back to prompt if script_command is absent.
+        # No LLM session is spun up.
+        _cron_type = job_def.get("type", "")
+        if _cron_type == "script":
+            _script_cmd = job_def.get("script_command", "") or prompt
+            _gate_cmd = job_def.get("gate_command", "")
+
+            async def cron_handler(  # type: ignore[misc]
+                _name=name,
+                _script=_script_cmd,
+                _gate=_gate_cmd,
+                _discord_channel_name=discord_channel_name,
+            ):
+                """Script cron: runs a shell command directly, no LLM."""
+                import subprocess as _sp
+                log.info("Cron job '%s' firing (script mode)", _name)
+                try:
+                    # Optional gate: run a quick check before the main script.
+                    # If gate exits non-zero, skip the main script.
+                    if _gate:
+                        gate_result = _sp.run(
+                            _gate, shell=True, capture_output=True, text=True, timeout=30
+                        )
+                        if gate_result.returncode != 0:
+                            log.info(
+                                "Cron job '%s' gate check failed (rc=%d) — skipping: %s",
+                                _name, gate_result.returncode, gate_result.stdout.strip()[:200],
+                            )
+                            return
+                    result = _sp.run(
+                        _script, shell=True, capture_output=True, text=True, timeout=600
+                    )
+                    output = (result.stdout + result.stderr).strip()
+                    log.info(
+                        "Cron job '%s' (script) exited rc=%d: %s",
+                        _name, result.returncode, output[:500],
+                    )
+                    # Optionally post output to a named Discord channel
+                    if discord_bot and discord_bot._client and _discord_channel_name and output:
+                        try:
+                            sent_any = False
+                            for guild in discord_bot._client.guilds:
+                                sent = await discord_bot.send_to_named_channel(
+                                    guild, _discord_channel_name, output
+                                )
+                                sent_any = sent_any or sent
+                            if not sent_any:
+                                log.warning(
+                                    "Cron '%s': Discord channel '#%s' not found on any guild",
+                                    _name, _discord_channel_name,
+                                )
+                        except Exception:
+                            log.exception("Cron '%s': failed to post script output to Discord", _name)
+                except Exception:
+                    log.exception("Script cron job '%s' failed", _name)
+
+            scheduler.add_job(cron_handler, trigger, id=name, name=name)
+            log.info("Scheduled SCRIPT cron job '%s': %s (%s)", name, schedule, tz)
+            continue
+
         # ── Local-model cron (no Claude API) ──────────────────────────────────
         # If model starts with "local:" or prompt == "HEARTBEAT_LOCAL_OLLAMA",
         # use Ollama directly instead of the Claude SDK.
@@ -607,6 +712,8 @@ def setup_scheduler(
             log.info("Scheduled LOCAL-MODEL cron job '%s': %s (%s) [%s]", name, schedule, tz, _local_ollama_model)
             continue
 
+        _gate_command = job_def.get("gate_command", "")
+
         async def cron_handler(
             _name=name,
             _prompt=prompt,
@@ -614,9 +721,22 @@ def setup_scheduler(
             _is_main=is_main_session,
             _notify_discord=notify_discord,
             _discord_channel_name=discord_channel_name,
+            _gate=_gate_command,
         ):
             log.info("Cron job '%s' firing", _name)
             try:
+                # ── Gate check (optional Gemma4/shell precheck) ───────────────
+                if _gate:
+                    import subprocess as _sp
+                    gate_result = _sp.run(
+                        _gate, shell=True, capture_output=True, text=True, timeout=60
+                    )
+                    if gate_result.returncode != 0:
+                        log.info(
+                            "Cron job '%s' gate check failed (rc=%d) — skipping LLM call: %s",
+                            _name, gate_result.returncode, gate_result.stdout.strip()[:200],
+                        )
+                        return
                 _aname = agent.config.identity_dir.name if agent.config.identity_dir else "hollow"
                 discord_channel_file = Path(f"/tmp/hollow_active_discord_{_aname}")
                 discord_ts_file = Path(f"/tmp/hollow_active_discord_ts_{_aname}")
