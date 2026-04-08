@@ -13,10 +13,15 @@ from .session import SessionLogger
 
 log = logging.getLogger(__name__)
 
-# Core files loaded into every context
-ALWAYS_LOAD = ["soul.md", "identity.md", "user.md", "agents.md", "tools.md"]
+# Core files loaded into every agent context
+ALWAYS_LOAD = ["soul.md", "identity.md", "tools.md"]
 # Files only loaded in main sessions
 MAIN_SESSION_ONLY = ["memory.md", "project_state.md", "heartbeat.md"]
+
+# Agents that receive Tyler's full user profile (routing + voice-aware agents)
+_USER_PROFILE_AGENTS: frozenset[str] = frozenset({"tarn", "spring"})
+# Agents that receive the team roster / routing table (coordinators only)
+_AGENTS_ROSTER_AGENTS: frozenset[str] = frozenset({"tarn"})
 
 
 class MemoryManager:
@@ -78,8 +83,18 @@ class MemoryManager:
         """Assemble full context string for the agent."""
         parts = []
 
+        # Determine agent identity for role-based file loading.
+        # Falls back to loading everything if identity_dir is not set (dev/test safety).
+        agent_name = self.config.identity_dir.name if self.config.identity_dir else ""
+
         # Core files
         files_to_load = list(ALWAYS_LOAD)
+        # user.md — Tyler's profile — only for coordinator (routing) and Spring (voice)
+        if not agent_name or agent_name in _USER_PROFILE_AGENTS:
+            files_to_load.append("user.md")
+        # agents.md — team roster — only for coordinator (Tarn)
+        if not agent_name or agent_name in _AGENTS_ROSTER_AGENTS:
+            files_to_load.append("agents.md")
         if is_main_session:
             files_to_load.extend(MAIN_SESSION_ONLY)
 
@@ -91,6 +106,14 @@ class MemoryManager:
         # NOTE: Session logs are NOT injected into context.
         # Hollow uses SQLite conversation history instead.
         # The session logger still WRITES logs for debugging purposes.
+
+        # Wiki memory index — available to all agents in main sessions
+        if is_main_session:
+            wiki_dir = self.config.memory_dir.parent / "wiki"
+            wiki_index = wiki_dir / "MEMORY.md"
+            if wiki_index.exists():
+                content = wiki_index.read_text()
+                parts.append(f'<file name="wiki/MEMORY.md">\n{content}\n</file>')
 
         # Native Claude CLI tools (always available via bypassPermissions)
         parts.append(
@@ -141,15 +164,30 @@ class MemoryManager:
         """Read a file from the memory directory.
 
         For soul.md and identity.md, checks identity_dir first (if configured).
+        Strips YAML frontmatter (--- ... ---) before returning content to LLM context.
         """
         if filename in ("soul.md", "identity.md", "tools.md") and self.config.identity_dir:
             override = self.config.identity_dir / filename
             if override.exists():
-                return override.read_text(encoding="utf-8")
+                return self._strip_frontmatter(override.read_text(encoding="utf-8"))
         path = self.config.memory_dir / filename
         if path.exists():
-            return path.read_text(encoding="utf-8")
+            return self._strip_frontmatter(path.read_text(encoding="utf-8"))
         return None
+
+    @staticmethod
+    def _strip_frontmatter(content: str) -> str:
+        """Strip YAML frontmatter from file content.
+
+        If the content starts with '---\\n', finds the closing '---\\n' and
+        returns the content after it. Otherwise returns content unchanged.
+        """
+        if not content.startswith("---\n"):
+            return content
+        end = content.find("---\n", 4)
+        if end == -1:
+            return content
+        return content[end + 4:]
 
     async def close(self) -> None:
         """Clean up resources."""

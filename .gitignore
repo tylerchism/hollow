@@ -42,3 +42,6 @@ Thumbs.db
 .idea/
 *.swp
 *.swo
+
+# Claude Code agent worktrees (isolated scratch areas, not committed)
+.claude/worktrees/

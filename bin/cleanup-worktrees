@@ -1,0 +1,99 @@
+#!/usr/bin/env bash
+# cleanup-worktrees — remove merged/stale worktrees from .claude/worktrees/
+#
+# Usage:
+#   bin/cleanup-worktrees [--dry-run]
+#
+# What it does:
+#   1. Runs 'git worktree prune' to remove git's internal refs for worktrees
+#      whose directories no longer exist.
+#   2. Scans .claude/worktrees/ for directories and removes any whose
+#      associated branch has already been merged into main (or master).
+#   3. With --dry-run, prints what would be removed without removing anything.
+
+set -euo pipefail
+
+HOLLOW_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+WORKTREES_DIR="${HOLLOW_ROOT}/.claude/worktrees"
+DRY_RUN=false
+
+for arg in "$@"; do
+  case "$arg" in
+    --dry-run) DRY_RUN=true ;;
+    *) echo "Unknown argument: $arg" >&2; exit 1 ;;
+  esac
+done
+
+cd "$HOLLOW_ROOT"
+
+# Step 1: prune stale worktree entries (dirs already deleted)
+echo "Running git worktree prune..."
+if $DRY_RUN; then
+  git worktree prune --dry-run 2>&1 | sed 's/^/  [dry-run] /'
+else
+  git worktree prune
+  echo "  Done."
+fi
+
+# Step 2: remove worktree dirs whose branch is merged
+if [[ ! -d "$WORKTREES_DIR" ]]; then
+  echo "No worktrees directory found at $WORKTREES_DIR — nothing to clean."
+  exit 0
+fi
+
+# Determine merge base branch (main preferred, fallback master)
+if git show-ref --quiet refs/heads/main; then
+  BASE_BRANCH="main"
+elif git show-ref --quiet refs/heads/master; then
+  BASE_BRANCH="master"
+else
+  echo "Warning: could not detect main or master branch — skipping merged-branch check." >&2
+  BASE_BRANCH=""
+fi
+
+removed=0
+skipped=0
+
+for worktree_dir in "$WORKTREES_DIR"/*/; do
+  [[ -d "$worktree_dir" ]] || continue
+
+  # Ask git what branch this worktree is on
+  branch="$(git -C "$worktree_dir" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")"
+
+  if [[ -z "$branch" || "$branch" == "HEAD" ]]; then
+    echo "  Skipping $worktree_dir (detached HEAD or unreadable)" >&2
+    ((skipped++)) || true
+    continue
+  fi
+
+  should_remove=false
+
+  if [[ -n "$BASE_BRANCH" ]]; then
+    # Check if this branch is already merged into BASE_BRANCH
+    merged_branches="$(git branch --merged "$BASE_BRANCH" 2>/dev/null || echo "")"
+    if echo "$merged_branches" | grep -qE "^\s*\*?\s*${branch}$"; then
+      should_remove=true
+      reason="branch '$branch' merged into $BASE_BRANCH"
+    fi
+  fi
+
+  if $should_remove; then
+    if $DRY_RUN; then
+      echo "  [dry-run] Would remove: $worktree_dir ($reason)"
+    else
+      echo "  Removing: $worktree_dir ($reason)"
+      git worktree remove --force "$worktree_dir"
+      ((removed++)) || true
+    fi
+  else
+    echo "  Keeping:  $worktree_dir (branch '$branch' not yet merged)"
+    ((skipped++)) || true
+  fi
+done
+
+echo ""
+if $DRY_RUN; then
+  echo "Dry run complete. Pass without --dry-run to apply."
+else
+  echo "Done. Removed: $removed, Kept: $skipped"
+fi

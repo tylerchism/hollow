@@ -9,6 +9,7 @@ Usage:
     hail --detach <agent> <task>         # fire async, print job_id and exit
     hail --poll <job_id> <agent>         # poll /result/<job_id> until done
     hail --detach <agent> <task> --result-channel <channel>  # post result to Discord
+    hail --worktree <agent> <task>       # create isolated git worktree, inject path into context
 
 Options:
     --user USER_ID           Stable per-user chat_id (e.g. Tyler's Telegram ID).
@@ -22,16 +23,21 @@ Options:
                              1 on error. Agent name is still required for URL resolution.
     --result-channel CHANNEL When using --detach, agent posts result to this Discord channel.
     --idempotency-key KEY    Idempotency key for /fire dedup.
+    --worktree               Create an isolated git worktree at .claude/worktrees/<agent>-<ts>/
+                             before dispatching. Injects worktree path into context so the agent
+                             works there. Default autonomy: tyler-checkpoint.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import subprocess
 import sys
 import time
 import urllib.error
 import urllib.request
+from datetime import datetime
 from pathlib import Path
 
 HOLLOW_ROOT = Path(__file__).parent.parent.resolve()
@@ -245,6 +251,14 @@ def main():
         metavar="KEY",
         help="Idempotency key for /fire dedup",
     )
+    parser.add_argument(
+        "--worktree",
+        action="store_true",
+        help=(
+            "Create an isolated git worktree at .claude/worktrees/<agent>-<timestamp>/ "
+            "before dispatching. Injects worktree path into agent context."
+        ),
+    )
 
     if len(sys.argv) < 2:
         parser.print_help()
@@ -279,9 +293,39 @@ def main():
     user_suffix = args.user if args.user else "main"
     chat_id = f"{agent_name}_{user_suffix}"
 
+    # ── --worktree mode ────────────────────────────────────────────────────────
+    worktree_context = ""
+    if args.worktree:
+        ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+        worktree_rel = f".claude/worktrees/{agent_name}-{ts}"
+        worktree_path = HOLLOW_ROOT / worktree_rel
+        worktree_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            subprocess.run(
+                ["git", "worktree", "add", str(worktree_path)],
+                cwd=str(HOLLOW_ROOT),
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            print(f"Created worktree: {worktree_path}", file=sys.stderr)
+        except subprocess.CalledProcessError as e:
+            print(f"Error creating worktree: {e.stderr.strip()}", file=sys.stderr)
+            sys.exit(1)
+        worktree_context = (
+            f"You are working in an isolated worktree at {worktree_path}. "
+            "Make all file changes there. Do not modify the main working tree. "
+            "Default autonomy level: tyler-checkpoint (pause and surface to Tyler "
+            "before any irreversible action or when blocked)."
+        )
+
     payload_data: dict = {"message": task, "chat_id": chat_id}
-    if args.context:
-        payload_data["context"] = args.context
+    # Merge worktree context with any explicit --context, worktree context goes first
+    combined_context = "\n\n".join(
+        part for part in [worktree_context, args.context] if part
+    )
+    if combined_context:
+        payload_data["context"] = combined_context
     if args.model:
         payload_data["model"] = _resolve_model(args.model)
 
