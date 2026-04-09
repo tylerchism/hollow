@@ -5,8 +5,12 @@ Fetches messages from #sources, filters for ones without a bot ✅ reaction,
 fetches the URL content, writes a structured entry to the monthly sources file,
 and marks the message as processed with a ✅ reaction.
 
+If the URL is identified as belonging to a known person (Chris Masterjohn,
+Daniel Vitalis, or Bret Weinstein), also calls bin/ingest-corpus to add the
+content to that person's vector corpus DB.
+
 Usage:
-    ingest-sources [--dry-run]
+    ingest-sources [--dry-run] [--skip-corpus]
 
 Reads DISCORD_BOT_TOKEN from agents/tarn/.env (or environment).
 SOURCES_CHANNEL_ID can be set in environment or falls back to the hardcoded default.
@@ -20,6 +24,7 @@ import argparse
 import json
 import os
 import re
+import subprocess
 import sys
 import urllib.error
 import urllib.parse
@@ -150,6 +155,138 @@ def _extract_urls(text: str) -> list[str]:
     return re.findall(r"https?://[^\s<>\"']+", text)
 
 
+# ── Person detection ──────────────────────────────────────────────────────────
+
+# Map person slug -> list of (compiled_pattern, match_target) tuples.
+# match_target is one of: "url" (match against the URL string only) or
+# "content" (match against fetched page content; falls back to URL check too).
+_PERSON_URL_PATTERNS: list[tuple[str, list[re.Pattern]]] = [
+    (
+        "chris-masterjohn",
+        [
+            re.compile(r"chrismasterjohn\.com", re.IGNORECASE),
+            # Substack slug contains "masterjohn"
+            re.compile(r"masterjohn\.substack\.com", re.IGNORECASE),
+            # substackcdn URLs that carry the masterjohn subdomain
+            re.compile(r"masterjohn[^/]*\.substackcdn\.com", re.IGNORECASE),
+        ],
+    ),
+    (
+        "daniel-vitalis",
+        [
+            re.compile(r"danielvitalis\.com", re.IGNORECASE),
+            re.compile(r"rewild\.com", re.IGNORECASE),
+            # Libsyn / podcast feeds associated with Vitalis
+            re.compile(r"rewild-yourself", re.IGNORECASE),
+        ],
+    ),
+    (
+        "bret-weinstein",
+        [
+            re.compile(r"bretweinstein\.net", re.IGNORECASE),
+            re.compile(r"darkhorsepodcast\.org", re.IGNORECASE),
+            # Substack slug contains "weinstein" or "darkhorse"
+            re.compile(r"weinstein\.substack\.com", re.IGNORECASE),
+            re.compile(r"darkhorse\.substack\.com", re.IGNORECASE),
+            re.compile(r"bretweinstein\.substack\.com", re.IGNORECASE),
+        ],
+    ),
+]
+
+# Content-level patterns (checked against fetched snippet when URL alone doesn't match).
+# Keyed by person slug; only applied when the URL domain is a generic host
+# (e.g. substackcdn.com without a subdomain hint).
+_PERSON_CONTENT_PATTERNS: dict[str, list[re.Pattern]] = {
+    "chris-masterjohn": [
+        re.compile(r"chris\s+masterjohn", re.IGNORECASE),
+        re.compile(r"masterjohn", re.IGNORECASE),
+    ],
+    "daniel-vitalis": [
+        re.compile(r"daniel\s+vitalis", re.IGNORECASE),
+        re.compile(r"rewild\s+yourself", re.IGNORECASE),
+    ],
+    "bret-weinstein": [
+        re.compile(r"bret\s+weinstein", re.IGNORECASE),
+        re.compile(r"dark\s*horse\s+podcast", re.IGNORECASE),
+    ],
+}
+
+# Generic hosts where we need content-level disambiguation
+_GENERIC_HOSTS = re.compile(
+    r"(substackcdn\.com|substack\.com|youtube\.com|youtu\.be|open\.spotify\.com|anchor\.fm)",
+    re.IGNORECASE,
+)
+
+
+def _detect_person(url: str, content_snippet: str | None) -> str | None:
+    """Return a person slug if the URL (or fetched content) matches a known person, else None."""
+    # First pass: URL-only patterns
+    for person_slug, patterns in _PERSON_URL_PATTERNS:
+        for pat in patterns:
+            if pat.search(url):
+                return person_slug
+
+    # Second pass: content-level patterns (only when on a generic host)
+    if content_snippet and _GENERIC_HOSTS.search(url):
+        for person_slug, patterns in _PERSON_CONTENT_PATTERNS.items():
+            for pat in patterns:
+                if pat.search(content_snippet):
+                    return person_slug
+
+    return None
+
+
+def _call_ingest_corpus(
+    url: str,
+    person_slug: str,
+    dry_run: bool,
+    hollow_root: Path,
+) -> None:
+    """Invoke bin/ingest-corpus as a subprocess to add url to the person's corpus DB."""
+    ingest_corpus_bin = hollow_root / "bin" / "ingest-corpus"
+    cmd = [
+        sys.executable,
+        str(ingest_corpus_bin),
+        "--person", person_slug,
+        "--source", url,
+        "--source-type", "blog",
+        "--platform", "website",
+        "--no-embed",  # skip embedding pass here; can be run separately
+    ]
+    if dry_run:
+        print(f"[dry-run] Would call: {' '.join(cmd)}")
+        return
+
+    print(f"[ingest-sources] calling ingest-corpus for person={person_slug} url={url}")
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        if result.returncode == 0:
+            try:
+                summary = json.loads(result.stdout)
+                print(
+                    f"[ingest-sources]   corpus ingested: "
+                    f"chunks_inserted={summary.get('chunks_inserted', '?')} "
+                    f"db={summary.get('db_path', '?')}"
+                )
+            except json.JSONDecodeError:
+                print(f"[ingest-sources]   corpus ingest output: {result.stdout.strip()[:200]}")
+        else:
+            print(
+                f"[ingest-sources]   WARNING: ingest-corpus exited {result.returncode} "
+                f"for {url}: {result.stderr.strip()[:300]}",
+                file=sys.stderr,
+            )
+    except subprocess.TimeoutExpired:
+        print(f"[ingest-sources]   WARNING: ingest-corpus timed out for {url}", file=sys.stderr)
+    except Exception as exc:
+        print(f"[ingest-sources]   WARNING: ingest-corpus failed for {url}: {exc}", file=sys.stderr)
+
+
 def _sources_file_path(dt: datetime) -> Path:
     """Return the wiki/sources-YYYY-MM.md path for the given datetime."""
     return WIKI_DIR / f"sources-{dt.strftime('%Y-%m')}.md"
@@ -202,6 +339,11 @@ def _append_source_entry(
 def main() -> None:
     parser = argparse.ArgumentParser(description="Ingest URLs from the #sources Discord channel.")
     parser.add_argument("--dry-run", action="store_true", help="Print what would be done; no writes or reactions")
+    parser.add_argument(
+        "--skip-corpus",
+        action="store_true",
+        help="Skip person-detection and corpus ingestion (wiki write only)",
+    )
     args = parser.parse_args()
 
     # Load token from env file first, then fall back to environment
@@ -291,6 +433,20 @@ def main() -> None:
                 content_snippet=content_snippet,
                 dry_run=args.dry_run,
             )
+
+            # Person-detection → corpus ingestion
+            if not args.skip_corpus:
+                person_slug = _detect_person(url, content_snippet)
+                if person_slug:
+                    print(f"[ingest-sources]   detected person={person_slug} for {url}")
+                    _call_ingest_corpus(
+                        url=url,
+                        person_slug=person_slug,
+                        dry_run=args.dry_run,
+                        hollow_root=HOLLOW_ROOT,
+                    )
+                else:
+                    print(f"[ingest-sources]   no person detected for {url}")
 
         # Mark as processed with ✅ reaction
         if not args.dry_run:
