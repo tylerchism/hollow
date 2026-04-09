@@ -9,7 +9,7 @@
     "notify_telegram": false,
     "discord_channel_name": "morning-brief",
     "chat_id": "cron_morning_brief",
-    "enabled": false
+    "enabled": true
   },
   {
     "name": "ideas_review",
@@ -21,7 +21,7 @@
     "notify_telegram": false,
     "discord_channel_name": "ideas",
     "chat_id": "cron_ideas_review",
-    "enabled": false,
+    "enabled": true,
     "gate_command": "python3 -c \"import json,subprocess; r=subprocess.run(['curl','-s','http://localhost:3333/api/ideas?status=ready','-H','x-api-key: 462f220e3c3f15324825a86373da874f92302bf6fc646e3330731468cc959c22'],capture_output=True,text=True); ideas=json.loads(r.stdout) if r.stdout.strip() else []; exit(0 if ideas else 1)\""
   },
   {
@@ -34,7 +34,7 @@
     "notify_telegram": false,
     "discord_channel_name": "tasks",
     "chat_id": "cron_backlog_triage",
-    "enabled": false,
+    "enabled": true,
     "gate_command": "python3 -c \"import json,subprocess; r=subprocess.run(['curl','-s','http://localhost:3333/api/tasks?status=backlog','-H','x-api-key: 462f220e3c3f15324825a86373da874f92302bf6fc646e3330731468cc959c22'],capture_output=True,text=True); tasks=json.loads(r.stdout) if r.stdout.strip() else []; exit(0 if tasks else 1)\""
   },
   {
@@ -47,11 +47,11 @@
     "notify_telegram": false,
     "discord_channel_name": "tasks",
     "chat_id": "cron_task_executor",
-    "enabled": false
+    "enabled": true
   },
   {
     "name": "team_retro",
-    "schedule": "0 18 * * *",
+    "schedule": "0 18 * * 5",
     "tz": "America/Chicago",
     "prompt": "Run Team Retro. NOTE: handle this yourself without consulting other agents. (1) Run `mc tasks list` to collect done/blocked/in_progress tasks. (2) TYLER DECISION THROUGHPUT — compute: (a) Count tasks moved blocked→done in last 48h. (b) List all currently blocked tasks with blocked_reason, sorted by age. (c) If count in (a) is zero, lead with '⚠ ZERO TYLER DECISIONS IN LAST 48H' and list pending decisions by age. (3) Review the data yourself: identify patterns, process improvements, concerns, and failure modes. (4) ROUTING QUALITY AUDIT — Run `mc activity list --type=routing.decision --limit=20` to fetch the last 20 routing decisions. Audit for: tasks Tarn self-handled that should have gone to a specialist, wrong routing choices, patterns of over/under-delegation. (5) If you identify process changes needed, create a task or idea via mc CLI. (6) MANDATORY CLOSING — for every stale block, routing violation, or actionable improvement: run `mc tasks create \"[short title]\" --description=\"[finding detail]\" --priority=medium --assigned-to=tarn --status=ready`. At least one task must be created per actionable finding or explicitly state: 'no actionable findings this cycle.' (7) Return your retro summary as the final response — the system automatically posts it to #tasks. Tyler decision throughput metric always appears first. Do NOT call send_msg or send_discord (those go to #tarn).",
     "model": "claude-sonnet-4-6",
@@ -59,7 +59,7 @@
     "notify_telegram": false,
     "discord_channel_name": "tasks",
     "chat_id": "cron_team_retro",
-    "enabled": false
+    "enabled": true
   },
   {
     "name": "ai_money_ideas",
@@ -74,20 +74,6 @@
     "enabled": false
   },
   {
-    "name": "watchdog",
-    "schedule": "*/30 * * * *",
-    "tz": "America/Chicago",
-    "prompt": "Run the Task Watchdog. SQL-only, no LLM calls. Steps:\n\n(1) HEALTH CHECK — abort if MC is unhealthy:\n  STATUS=$(curl -s http://localhost:3333/api/health | python3 -c \"import json,sys; d=json.load(sys.stdin); print(d.get('status','unknown'))\" 2>/dev/null)\n  If STATUS is not 'ok' or 'degraded', print 'MC unhealthy — watchdog aborting' and exit.\n\n(2) NULL-HEARTBEAT PHANTOM DETECTION — find in_progress tasks where heartbeat_at IS NULL AND updated_at > 15 minutes ago. These are phantom-stuck tasks: the executor claimed them (set status=in_progress) but died before writing any heartbeat.\n\npython3 << 'NHEOF'\nimport json, subprocess, sys\nfrom datetime import datetime, timezone, timedelta\n\napi_key = '462f220e3c3f15324825a86373da874f92302bf6fc646e3330731468cc959c22'\nbase = 'http://localhost:3333/api'\nNULL_HB_THRESHOLD_SECONDS = 15 * 60  # 15 minutes\nMAX_RESETS = 3  # after 3 resets, flip to condition_blocked to prevent thrash loop\n\ndef api_get(path):\n    r = subprocess.run(['curl', '-s', f'{base}{path}', '-H', f'x-api-key: {api_key}'], capture_output=True, text=True)\n    try: return json.loads(r.stdout)\n    except: return None\n\ndef api_patch(path, data):\n    r = subprocess.run(['curl', '-s', '-X', 'PATCH', f'{base}{path}', '-H', f'x-api-key: {api_key}', '-H', 'Content-Type: application/json', '-d', json.dumps(data)], capture_output=True, text=True)\n    return r.returncode == 0\n\nip_tasks = api_get('/tasks?status=in_progress') or []\nif not isinstance(ip_tasks, list):\n    print('null-hb: failed to fetch in_progress tasks')\n    sys.exit(0)\n\nnow = datetime.now(timezone.utc)\nphantom_count = 0\nceiling_count = 0\n\nfor task in ip_tasks:\n    tid = task.get('id')\n    title = task.get('title', '')\n    heartbeat_at = task.get('heartbeat_at')\n    updated_at = task.get('updated_at')\n    attempt_count = task.get('attempt_count', 0)\n    stale_count = task.get('stale_count', 0)\n    tags = task.get('tags') or []\n\n    # Only process tasks with NULL heartbeat\n    if heartbeat_at is not None:\n        continue\n\n    if not updated_at:\n        continue\n\n    try:\n        updated_dt = datetime.fromisoformat(updated_at.replace('Z', '+00:00'))\n    except Exception:\n        continue\n\n    age_seconds = (now - updated_dt).total_seconds()\n    if age_seconds <= NULL_HB_THRESHOLD_SECONDS:\n        continue  # Too recent — still starting up, give it time\n\n    # Phantom-stuck task detected. Check reset_count (use stale_count as proxy).\n    # reset_count is tracked via the 'watchdog-reset-count' tag value or stale_count.\n    # Use attempt_count to track number of watchdog resets (consistent with expired-lease logic).\n    if attempt_count >= MAX_RESETS:\n        # Ceiling hit — flip to condition_blocked to prevent thrash loop\n        new_tags = list(set(tags + ['condition-blocked', 'watchdog-ceiling']))\n        new_tags = [t for t in new_tags if t not in ('needs-review',)]\n        ok = api_patch(f'/tasks/{tid}', {\n            'status': 'condition_blocked',\n            'blocked_reason': f'Watchdog: null-heartbeat phantom detected {attempt_count} times — ceiling hit ({MAX_RESETS} resets). Manual review required.',\n            'tags': new_tags,\n            'heartbeat_at': None,\n            'lease_expires_at': None,\n            'locked_by': None\n        })\n        if ok:\n            print(f'[CEILING] Task {tid} ({title[:50]}): null-hb phantom, reset_count={attempt_count} >= {MAX_RESETS} — flipped to condition_blocked')\n            ceiling_count += 1\n    else:\n        # Reset to ready with needs-review tag\n        new_tags = list(set(tags + ['needs-review']))\n        ok = api_patch(f'/tasks/{tid}', {\n            'status': 'ready',\n            'attempt_count': attempt_count + 1,\n            'stale_count': stale_count + 1,\n            'tags': new_tags,\n            'heartbeat_at': None,\n            'lease_expires_at': None,\n            'locked_by': None\n        })\n        if ok:\n            print(f'[NULL-HB] Task {tid} ({title[:50]}): null-heartbeat phantom reset to ready (reset {attempt_count+1}/{MAX_RESETS}), tagged needs-review')\n            phantom_count += 1\n\nif phantom_count == 0 and ceiling_count == 0:\n    print('null-hb: no null-heartbeat phantom tasks found')\nelse:\n    print(f'null-hb: {phantom_count} phantom task(s) reset to ready, {ceiling_count} hit ceiling and flipped to condition_blocked')\nNHEOF\n\n\nIMPORTANT — RESPECT expected_duration_minutes: When checking lease expiry in step (3), respect the task's `expected_duration_minutes` field if present. If `expected_duration_minutes` is set and the task's heartbeat_at is more recent than `expected_duration_minutes` minutes ago, do NOT flag it as expired — the task declared it needs more time. Only flag tasks where the lease has expired AND the elapsed time since heartbeat_at exceeds `expected_duration_minutes` (or 15 minutes if not set). In the python3 block for step (4), add this check before processing each expired task:\n  expected_mins = task.get('expected_duration_minutes') or 15\n  heartbeat_at = task.get('heartbeat_at')\n  if heartbeat_at:\n      try:\n          hb_dt = datetime.fromisoformat(heartbeat_at.replace('Z', '+00:00'))\n          elapsed_mins = (now - hb_dt).total_seconds() / 60\n          if elapsed_mins < expected_mins:\n              print(f'[SKIP] Task {tid}: lease expired but within expected_duration_minutes={expected_mins} (elapsed={elapsed_mins:.1f}m) — skipping')\n              continue\n      except Exception:\n          pass\n\n(3) FIND EXPIRED LEASES — find all in_progress tasks where lease_expires_at is set and has passed:\n  NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)\n  EXPIRED=$(curl -s 'http://localhost:3333/api/tasks?status=in_progress' -H 'x-api-key: 462f220e3c3f15324825a86373da874f92302bf6fc646e3330731468cc959c22' | python3 -c \"\nimport json, sys\nfrom datetime import datetime, timezone\ntasks = json.load(sys.stdin)\nnow = datetime.now(timezone.utc)\nexpired = [t for t in tasks if t.get('lease_expires_at') and datetime.fromisoformat(t['lease_expires_at'].replace('Z','+00:00')) < now]\nprint(json.dumps(expired))\n\")\n\n(4) FOR EACH EXPIRED TASK — process based on attempt_count vs max_attempt_count (3):\n  Use python3 to iterate and call PATCH for each expired task:\n\n  python3 << 'EOF'\nimport json, subprocess, sys\nfrom datetime import datetime, timezone\n\nexpired = json.loads('''EXPIRED_JSON_HERE''')  # replace with actual $EXPIRED value\nmax_attempts = 3\napi_key = '462f220e3c3f15324825a86373da874f92302bf6fc646e3330731468cc959c22'\n\nfor task in expired:\n    tid = task['id']\n    title = task['title']\n    attempt_count = task.get('attempt_count', 0)\n    stale_count = task.get('stale_count', 0)\n    tags = task.get('tags', [])\n\n    if attempt_count < max_attempts:\n        # Reset to ready, increment counters, tag needs-review\n        new_tags = list(set(tags + ['needs-review']))\n        payload = json.dumps({\n            'status': 'ready',\n            'attempt_count': attempt_count + 1,\n            'stale_count': stale_count + 1,\n            'tags': new_tags,\n            'heartbeat_at': None,\n            'lease_expires_at': None,\n            'locked_by': None\n        })\n        result = subprocess.run(['curl', '-s', '-X', 'PATCH', f'http://localhost:3333/api/tasks/{tid}',\n            '-H', 'Content-Type: application/json', '-H', f'x-api-key: {api_key}', '-d', payload],\n            capture_output=True, text=True)\n        print(f'[WARN] Task {tid} ({title[:50]}): lease expired, attempt {attempt_count+1}/{max_attempts} — reset to ready, tagged needs-review')\n    else:\n        # Max retries reached — mark failed\n        new_tags = list(set(tags + ['max-retries-reached']))\n        payload = json.dumps({\n            'status': 'blocked',\n            'blocked_reason': f'Watchdog: max retries reached ({attempt_count} attempts). Task failed to complete within lease window.',\n            'tags': new_tags,\n            'heartbeat_at': None,\n            'lease_expires_at': None,\n            'locked_by': None\n        })\n        result = subprocess.run(['curl', '-s', '-X', 'PATCH', f'http://localhost:3333/api/tasks/{tid}',\n            '-H', 'Content-Type: application/json', '-H', f'x-api-key: {api_key}', '-d', payload],\n            capture_output=True, text=True)\n        print(f'[ERROR] Task {tid} ({title[:50]}): max retries reached ({attempt_count} attempts) — marked blocked with max-retries-reached')\nEOF\n\n(5) STALE READY CHECK — find tasks stuck in ready status for more than 4 hours (indicates task_executor missed them):\n\npython3 << 'PYEOF'\nimport json, subprocess, sys\nfrom datetime import datetime, timezone\n\napi_key = '462f220e3c3f15324825a86373da874f92302bf6fc646e3330731468cc959c22'\nbase = 'http://localhost:3333/api'\nSTALE_THRESHOLD_SECONDS = 4 * 3600  # 4 hours\n\ndef api_get(path):\n    r = subprocess.run(['curl', '-s', f'{base}{path}', '-H', f'x-api-key: {api_key}'], capture_output=True, text=True)\n    try: return json.loads(r.stdout)\n    except: return None\n\ndef api_patch(path, data):\n    r = subprocess.run(['curl', '-s', '-X', 'PATCH', f'{base}{path}', '-H', f'x-api-key: {api_key}', '-H', 'Content-Type: application/json', '-d', json.dumps(data)], capture_output=True, text=True)\n    return r.returncode == 0\n\nready_tasks = api_get('/tasks?status=ready')\nif not ready_tasks or not isinstance(ready_tasks, list):\n    print('stale-ready: no ready tasks or fetch failed')\n    sys.exit(0)\n\nnow = datetime.now(timezone.utc)\nalerted = 0\n\nfor task in ready_tasks:\n    tid = task.get('id')\n    title = task.get('title', '')\n    updated_at = task.get('updated_at')\n    stale_count = task.get('stale_count', 0)\n\n    if not updated_at:\n        continue\n\n    try:\n        updated_dt = datetime.fromisoformat(updated_at.replace('Z', '+00:00'))\n    except Exception:\n        continue\n\n    age_seconds = (now - updated_dt).total_seconds()\n    if age_seconds <= STALE_THRESHOLD_SECONDS:\n        continue\n\n    # Already alerted this cycle if stale_count > 0\n    if stale_count > 0:\n        print(f'[SKIP] Task {tid} ({title[:50]}): already alerted (stale_count={stale_count})')\n        continue\n\n    # Compute human-readable age\n    total_minutes = int(age_seconds // 60)\n    hours = total_minutes // 60\n    minutes = total_minutes % 60\n\n    # Increment stale_count to prevent duplicate alerts\n    api_patch(f'/tasks/{tid}', {'stale_count': stale_count + 1})\n\n    # Post alert to Discord #tasks channel\n    alert_msg = f'\\u26a0\\ufe0f STALE READY: {title} (ID: {tid}) has been in ready status for {hours}h {minutes}m \\u2014 task_executor may have missed it'\n    subprocess.run(['send_discord_channel', 'tasks', alert_msg], capture_output=True, text=True)\n    print(f'[STALE-READY] Task {tid} ({title[:50]}): {hours}h {minutes}m in ready — alerted Discord #tasks')\n    alerted += 1\n\nif alerted == 0:\n    print('stale-ready: no tasks stuck in ready for >4h')\nelse:\n    print(f'stale-ready: {alerted} stale-ready alert(s) sent to Discord #tasks')\nPYEOF\n\n(6) STALE IN-PROGRESS CHECK — find in_progress tasks with no recent activity that may be stuck:\n\npython3 << 'SIPEOF'\nimport json, subprocess, sys\nfrom datetime import datetime, timezone\n\napi_key = '462f220e3c3f15324825a86373da874f92302bf6fc646e3330731468cc959c22'\nbase = 'http://localhost:3333/api'\nSTALE_IP_THRESHOLD_SECONDS = 3 * 24 * 3600  # 3 days\nACTIVITY_LOOKBACK_SECONDS = 3 * 24 * 3600   # 3 days\nHEARTBEAT_RECENT_SECONDS = 2 * 3600         # 2 hours\n\ndef api_get(path):\n    r = subprocess.run(['curl', '-s', f'{base}{path}', '-H', f'x-api-key: {api_key}'], capture_output=True, text=True)\n    try: return json.loads(r.stdout)\n    except: return None\n\ndef api_patch(path, data):\n    r = subprocess.run(['curl', '-s', '-X', 'PATCH', f'{base}{path}', '-H', f'x-api-key: {api_key}', '-H', 'Content-Type: application/json', '-d', json.dumps(data)], capture_output=True, text=True)\n    return r.returncode == 0\n\nip_tasks = api_get('/tasks?status=in_progress')\nif not ip_tasks or not isinstance(ip_tasks, list):\n    print('stale-in-progress: no in_progress tasks or fetch failed')\n    sys.exit(0)\n\nactivity = api_get('/activity?limit=200') or []\nif not isinstance(activity, list): activity = []\n\nnow = datetime.now(timezone.utc)\nalerted = 0\n\nfor task in ip_tasks:\n    tid = task.get('id')\n    title = task.get('title', '')\n    updated_at = task.get('updated_at')\n    heartbeat_at = task.get('heartbeat_at')\n    stale_count = task.get('stale_count', 0)\n\n    # Skip if heartbeat is recent (task is actively running)\n    if heartbeat_at:\n        try:\n            hb_dt = datetime.fromisoformat(heartbeat_at.replace('Z', '+00:00'))\n            if (now - hb_dt).total_seconds() <= HEARTBEAT_RECENT_SECONDS:\n                print(f'[SKIP] Task {tid} ({title[:50]}): heartbeat recent — actively running')\n                continue\n        except Exception:\n            pass\n\n    if not updated_at:\n        continue\n\n    try:\n        updated_dt = datetime.fromisoformat(updated_at.replace('Z', '+00:00'))\n    except Exception:\n        continue\n\n    age_seconds = (now - updated_dt).total_seconds()\n    if age_seconds <= STALE_IP_THRESHOLD_SECONDS:\n        continue\n\n    # Check activity log for any entry mentioning this task ID in the last 3 days\n    recent_activity = [\n        a for a in activity\n        if tid in (a.get('summary') or '') and\n        a.get('created_at') and\n        (now - datetime.fromisoformat(a['created_at'].replace('Z', '+00:00'))).total_seconds() <= ACTIVITY_LOOKBACK_SECONDS\n    ]\n\n    if recent_activity:\n        print(f'[SKIP] Task {tid} ({title[:50]}): recent activity log entry found — not stale')\n        continue\n\n    # Compute human-readable age\n    total_seconds = int(age_seconds)\n    days = total_seconds // 86400\n    hours = (total_seconds % 86400) // 3600\n\n    # Increment stale_count to prevent duplicate alerts\n    api_patch(f'/tasks/{tid}', {'stale_count': stale_count + 1})\n\n    # Post alert to Discord #tasks channel\n    alert_msg = f'\\u26a0\\ufe0f STALE IN-PROGRESS: {title} (ID: {tid}) has been in_progress for {days}d {hours}h with no recent activity log \\u2014 may be stuck or forgotten'\n    subprocess.run(['send_discord_channel', 'tasks', alert_msg], capture_output=True, text=True)\n    print(f'[STALE-IN-PROGRESS] Task {tid} ({title[:50]}): {days}d {hours}h in_progress with no activity — alerted Discord #tasks')\n    alerted += 1\n\nif alerted == 0:\n    print('stale-in-progress: no tasks stuck in in_progress for >3d without activity')\nelse:\n    print(f'stale-in-progress: {alerted} stale-in-progress alert(s) sent to Discord #tasks')\nSIPEOF\n\nActual implementation: use Bash to run the curl health check, then fetch in_progress tasks, then use python3 inline to process the expired ones as described above. No LLM calls — pure curl + python3. Log what you do. Return a brief summary of how many tasks were reset, how many hit max retries, how many had no expired leases, how many stale-ready alerts were sent, and how many stale-in-progress alerts were sent.",
-    "model": "claude-sonnet-4-6",
-    "is_main_session": false,
-    "notify_telegram": false,
-    "discord_channel_name": "",
-    "chat_id": "cron_watchdog",
-    "enabled": false,
-    "type": "script",
-    "script_command": "python3 /home/tchism/git/hollow/bin/watchdog"
-  },
-  {
     "name": "agent_upgrades",
     "schedule": "0 8 * * *",
     "tz": "America/Chicago",
@@ -97,7 +83,7 @@
     "notify_telegram": false,
     "discord_channel_name": "agent-upgrades",
     "chat_id": "cron_agent_upgrades",
-    "enabled": false
+    "enabled": true
   },
   {
     "name": "agent_upgrades_triage",
@@ -109,7 +95,7 @@
     "notify_telegram": false,
     "discord_channel_name": "agent-upgrades",
     "chat_id": "cron_agent_upgrades_triage",
-    "enabled": false
+    "enabled": true
   },
   {
     "name": "maintenance_restart",
@@ -121,7 +107,7 @@
     "notify_telegram": false,
     "discord_channel_name": "",
     "chat_id": "cron_maintenance_restart",
-    "enabled": false,
+    "enabled": true,
     "type": "script",
     "script_command": "bash /home/tchism/git/hollow/bin/maintenance-restart 2>&1 || true"
   },
@@ -135,7 +121,7 @@
     "notify_telegram": false,
     "discord_channel_name": "",
     "chat_id": "cron_condition_resolver",
-    "enabled": false,
+    "enabled": true,
     "type": "script",
     "script_command": "python3 /home/tchism/git/hollow/bin/condition-resolver 2>&1 || true"
   },
@@ -149,7 +135,7 @@
     "notify_telegram": false,
     "discord_channel_name": "tasks",
     "chat_id": "cron_dv_discovery",
-    "enabled": false
+    "enabled": true
   },
   {
     "name": "stale_project_check",
@@ -161,7 +147,7 @@
     "notify_telegram": false,
     "discord_channel_name": "tasks",
     "chat_id": "cron_stale_project_check",
-    "enabled": false,
+    "enabled": true,
     "type": "script",
     "script_command": "python3 /home/tchism/git/hollow/bin/stale-project-check 2>&1 || true"
   },
@@ -175,22 +161,22 @@
     "notify_telegram": false,
     "discord_channel_name": "",
     "chat_id": "cron_corpus_health_check",
-    "enabled": false,
+    "enabled": true,
     "type": "script",
     "script_command": "/home/tchism/git/hollow/bin/check-corpus-health --all 2>&1 || true"
   },
   {
     "name": "heartbeat",
-    "schedule": "*/5 * * * *",
+    "schedule": "*/15 * * * *",
     "tz": "America/Chicago",
     "enabled": true,
     "model": "local:gemma4:e4b",
-    "prompt": "You are running a system health check for the Hollow multi-agent system. Execute each check using bash commands only. Do NOT use the LLM for any check logic — only invoke it at the end to format a failure alert if needed.\n\nRun all 5 checks in sequence. Collect results. At the end, report pass/fail.\n\n---\n\nCHECK 1 — Agent liveness\n\nFor each agent, run a health check. The agents and their ports are:\n- tarn (coordinator): port 18800\n- tap: port 18792\n- canopy: port 18793\n- briar: port 18794\n- forge: port 18795\n- spring: port 18796\n- reed: port 18797\n- journal: port 18798\n- flux: port 18799\n\nFor each agent, run:\n```bash\nHTTP_CODE=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:<PORT>/health --max-time 3 2>/dev/null)\nif [ \"$HTTP_CODE\" = \"200\" ]; then\n  echo \"check1 <AGENT>: PASS (HTTP 200)\"\nelse\n  echo \"check1 <AGENT>: FAIL (HTTP $HTTP_CODE or timeout)\"\nfi\n```\n\nDo this for all 9 agents (tarn/18800, tap/18792, canopy/18793, briar/18794, forge/18795, spring/18796, reed/18797, journal/18798, flux/18799). Collect any FAILs.\n\n---\n\nCHECK 2 — MC API health\n\n```bash\nMC_RESPONSE=$(curl -s 'http://localhost:3333/api/tasks?limit=1' \\\n  -H 'x-api-key: 462f220e3c3f15324825a86373da874f92302bf6fc646e3330731468cc959c22' \\\n  --max-time 5 2>/dev/null)\nif echo \"$MC_RESPONSE\" | python3 -c \"import sys, json; json.load(sys.stdin)\" 2>/dev/null; then\n  echo \"check2 mc_api: PASS (valid JSON)\"\nelse\n  echo \"check2 mc_api: FAIL (timeout, non-JSON, or HTTP error) — response: $MC_RESPONSE\"\nfi\n```\n\n---\n\nCHECK 3 — Task lease audit\n\n```bash\nIN_PROGRESS=$(curl -s 'http://localhost:3333/api/tasks?status=in_progress' \\\n  -H 'x-api-key: 462f220e3c3f15324825a86373da874f92302bf6fc646e3330731468cc959c22' \\\n  --max-time 5 2>/dev/null)\nORPHANED=$(echo \"$IN_PROGRESS\" | python3 -c \"\nimport sys, json, datetime\ntry:\n    tasks = json.load(sys.stdin)\n    orphaned = []\n    for t in tasks:\n        lease = t.get('lease_expires_at')\n        if lease:\n            ts = datetime.datetime.fromisoformat(lease.replace('Z', '+00:00'))\n            now = datetime.datetime.now(datetime.timezone.utc)\n            if ts < now:\n                orphaned.append(f\\\"id={t.get('id')} title={t.get('title','?')} expired={lease}\\\")\n    if orphaned:\n        print('ORPHANED:' + '|'.join(orphaned))\n    else:\n        print('NONE')\nexcept Exception as e:\n    print(f'ERROR:{e}')\n\" 2>/dev/null)\nif [ \"$ORPHANED\" = \"NONE\" ]; then\n  echo \"check3 lease_audit: PASS (no orphaned tasks)\"\nelse\n  echo \"check3 lease_audit: FAIL — $ORPHANED\"\nfi\n```\n\n---\n\nCHECK 4 — Cron schedule verification (STUB)\n\n```bash\necho \"check4: skipped — APScheduler does not persist last_run_time; implementation deferred to Phase 2\"\n```\n\nNote filed: Full cron schedule verification requires adding last_run tracking to the scheduler. APScheduler tracks next_run_time but not last_run_time.\n\n---\n\nCHECK 5 — Disk and memory baseline\n\n```bash\nDISK_PCT=$(df --output=pcent $HOME/git/hollow/data/ 2>/dev/null | tail -1 | tr -d ' %')\nMEM_PCT=$(free | awk '/Mem:/{printf \"%.0f\", $3/$2*100}')\nif [ \"$DISK_PCT\" -gt 85 ] 2>/dev/null; then\n  echo \"check5 disk: FAIL — ${DISK_PCT}% used (threshold: 85%)\"\nelse\n  echo \"check5 disk: PASS — ${DISK_PCT}% used\"\nfi\nif [ \"$MEM_PCT\" -gt 90 ] 2>/dev/null; then\n  echo \"check5 memory: FAIL — ${MEM_PCT}% used (threshold: 90%)\"\nelse\n  echo \"check5 memory: PASS — ${MEM_PCT}% used\"\nfi\n```\n\n---\n\nFINAL STEP — Report and alert\n\nAfter running all 5 checks, review the collected output lines:\n\n- If ALL checks passed (no FAIL lines in output from checks 1, 2, 3, 5):\n  ```bash\n  mc activity log 'heartbeat: all checks passed'\n  ```\n  Then exit. No LLM formatting needed.\n\n- If ANY check failed: Use your language model capability to format a structured Discord alert. The alert must include for each failure:\n  - Check name (e.g., \"check1 forge agent liveness\")\n  - Expected state (e.g., \"HTTP 200 from /health\")\n  - Actual state (e.g., \"timeout after 3s\")\n  - Suggested action (e.g., \"run: ./start.sh forge\" or \"check logs at data/forge/\")\n\n  Format the alert as plain text (no markdown headers, use newlines). Keep it under 1800 characters for Discord.\n\n  Then post it:\n  ```bash\n  send_discord_channel system-health \"<your formatted alert>\"\n  ```\n\n  Also log to MC:\n  ```bash\n  mc activity log 'heartbeat: N checks failed — alert posted to #system-health'\n  ```",
+    "prompt": "You are running a system health check for the Hollow multi-agent system. Execute each check using bash commands only. Do NOT use the LLM for any check logic — only invoke it at the end to format a failure alert if needed.\n\nRun all 5 checks in sequence. Collect results. At the end, report pass/fail.\n\n---\n\n---\n\nCHECK 2 — MC API health\n\n```bash\nMC_RESPONSE=$(curl -s 'http://localhost:3333/api/tasks?limit=1' \\\n  -H 'x-api-key: 462f220e3c3f15324825a86373da874f92302bf6fc646e3330731468cc959c22' \\\n  --max-time 5 2>/dev/null)\nif echo \"$MC_RESPONSE\" | python3 -c \"import sys, json; json.load(sys.stdin)\" 2>/dev/null; then\n  echo \"check2 mc_api: PASS (valid JSON)\"\nelse\n  echo \"check2 mc_api: FAIL (timeout, non-JSON, or HTTP error) — response: $MC_RESPONSE\"\nfi\n```\n\n---\n\nCHECK 3 — Task lease audit\n\n```bash\nIN_PROGRESS=$(curl -s 'http://localhost:3333/api/tasks?status=in_progress' \\\n  -H 'x-api-key: 462f220e3c3f15324825a86373da874f92302bf6fc646e3330731468cc959c22' \\\n  --max-time 5 2>/dev/null)\nORPHANED=$(echo \"$IN_PROGRESS\" | python3 -c \"\nimport sys, json, datetime\ntry:\n    tasks = json.load(sys.stdin)\n    orphaned = []\n    for t in tasks:\n        lease = t.get('lease_expires_at')\n        if lease:\n            ts = datetime.datetime.fromisoformat(lease.replace('Z', '+00:00'))\n            now = datetime.datetime.now(datetime.timezone.utc)\n            if ts < now:\n                orphaned.append(f\\\"id={t.get('id')} title={t.get('title','?')} expired={lease}\\\")\n    if orphaned:\n        print('ORPHANED:' + '|'.join(orphaned))\n    else:\n        print('NONE')\nexcept Exception as e:\n    print(f'ERROR:{e}')\n\" 2>/dev/null)\nif [ \"$ORPHANED\" = \"NONE\" ]; then\n  echo \"check3 lease_audit: PASS (no orphaned tasks)\"\nelse\n  echo \"check3 lease_audit: FAIL — $ORPHANED\"\nfi\n```\n\n---\n\nCHECK 4 — Cron schedule verification (STUB)\n\n```bash\necho \"check4: skipped — APScheduler does not persist last_run_time; implementation deferred to Phase 2\"\n```\n\nNote filed: Full cron schedule verification requires adding last_run tracking to the scheduler. APScheduler tracks next_run_time but not last_run_time.\n\n---\n\nCHECK 5 — Disk and memory baseline\n\n```bash\nDISK_PCT=$(df --output=pcent $HOME/git/hollow/data/ 2>/dev/null | tail -1 | tr -d ' %')\nMEM_PCT=$(free | awk '/Mem:/{printf \"%.0f\", $3/$2*100}')\nif [ \"$DISK_PCT\" -gt 85 ] 2>/dev/null; then\n  echo \"check5 disk: FAIL — ${DISK_PCT}% used (threshold: 85%)\"\nelse\n  echo \"check5 disk: PASS — ${DISK_PCT}% used\"\nfi\nif [ \"$MEM_PCT\" -gt 90 ] 2>/dev/null; then\n  echo \"check5 memory: FAIL — ${MEM_PCT}% used (threshold: 90%)\"\nelse\n  echo \"check5 memory: PASS — ${MEM_PCT}% used\"\nfi\n```\n\n---\n\nFINAL STEP — Report and alert\n\nAfter running all 5 checks, review the collected output lines:\n\n- If ALL checks passed (no FAIL lines in output from checks 1, 2, 3, 5):\n  ```bash\n  mc activity log 'heartbeat: all checks passed'\n  ```\n  Then exit. No LLM formatting needed.\n\n- If ANY check failed: Use your language model capability to format a structured Discord alert. The alert must include for each failure:\n  - Check name (e.g., \"check1 forge agent liveness\")\n  - Expected state (e.g., \"HTTP 200 from /health\")\n  - Actual state (e.g., \"timeout after 3s\")\n  - Suggested action (e.g., \"run: ./start.sh forge\" or \"check logs at data/forge/\")\n\n  Format the alert as plain text (no markdown headers, use newlines). Keep it under 1800 characters for Discord.\n\n  Then post it:\n  ```bash\n  send_discord_channel system-health \"<your formatted alert>\"\n  ```\n\n  Also log to MC:\n  ```bash\n  mc activity log 'heartbeat: N checks failed — alert posted to #system-health'\n  ```",
     "is_main_session": false,
     "notify_telegram": false,
     "discord_channel_name": "system-health",
     "chat_id": "cron_heartbeat",
-    "_note": "Uses local Gemma4 via Ollama — no Claude API burn. Set enabled:true after Tyler confirms #system-health Discord channel exists. Check 4 (cron schedule verification) is a stub — APScheduler does not persist last_run_time; full implementation deferred to Phase 2."
+    "_note": "Uses local Gemma4 via Ollama — no Claude API burn. Check 4 (cron schedule verification) is a stub — APScheduler does not persist last_run_time; full implementation deferred to Phase 2. Agent liveness check moved to OS-level watchdog cron."
   },
   {
     "name": "wiki_compiler",
