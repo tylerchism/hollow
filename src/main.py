@@ -1104,6 +1104,23 @@ async def _send_startup_notification(config, agent, discord_bot) -> None:
     except Exception:
         log.debug("Startup: failed to read restart reason file", exc_info=True)
 
+    # Fallback: if no /tmp reason file, read last entry from hollow-restart-log.jsonl
+    if not _restart_reason_text:
+        try:
+            _restart_log = config.data_dir.parent / "hollow-restart-log.jsonl"
+            if _restart_log.exists():
+                import json as _json
+                _lines = _restart_log.read_text().strip().splitlines()
+                if _lines:
+                    _entry = _json.loads(_lines[-1])
+                    _restart_reason_text = (
+                        f"{_entry.get('trigger', '?')}: {_entry.get('detail', 'unknown')} "
+                        f"(logged {_entry.get('timestamp', '?')})"
+                    )
+                    log.info("Startup: restart reason from JSONL log: %s", _restart_reason_text)
+        except Exception:
+            log.debug("Startup: failed to read hollow-restart-log.jsonl", exc_info=True)
+
     # Startup is a read-only context review — block Bash so the agent cannot
     # execute shell commands (restart-tarn, kill, pkill, etc.) while booting.
     from src.agent import NATIVE_TOOLS
@@ -1152,13 +1169,13 @@ async def _send_startup_notification(config, agent, discord_bot) -> None:
     # Maintenance restart: post a minimal one-liner to Discord #tarn only.
     if is_maintenance:
         log.info("Maintenance restart detected — sending minimal notification to Discord only")
+        maint_msg = "Maintenance restart complete."
+        if _restart_reason_text and "maintenance" not in _restart_reason_text.lower():
+            maint_msg += f" Reason: {_restart_reason_text}"
         if discord_bot and discord_bot._client:
             for discord_chat_id, tarn_channel in discord_bot.get_tarn_chat_ids():
                 try:
-                    await discord_bot._send_chunked(
-                        tarn_channel,
-                        "Maintenance restart complete. Crons reloaded.",
-                    )
+                    await discord_bot._send_chunked(tarn_channel, maint_msg)
                 except Exception:
                     log.exception("Failed to send maintenance restart notification to Discord channel %s", discord_chat_id)
         return
