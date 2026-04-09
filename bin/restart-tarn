@@ -14,6 +14,19 @@ set -euo pipefail
 TARN_PORT=18800
 TARN_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 
+# Require --reason argument — every manual restart must be labeled.
+_HAS_REASON=0
+for _a in "$@"; do
+    [ "$_a" = "--reason" ] && _HAS_REASON=1 && break
+done
+if [ "$_HAS_REASON" -eq 0 ]; then
+    echo "Usage: restart-tarn --reason <reason>" >&2
+    echo "  --reason is required. Every manual restart must include a reason." >&2
+    echo "  Example: restart-tarn --reason 'testing new config'" >&2
+    exit 1
+fi
+unset _HAS_REASON _a
+
 # Capture the active Discord channel before the kill so the new process
 # wakes up in the same channel Tyler was using.
 ORIGIN_CHANNEL_ARGS=()
