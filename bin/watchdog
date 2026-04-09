@@ -509,6 +509,27 @@ def _main(args) -> None:
 
     for a in agents:
         name, port = a["name"], a["port"]
+
+        # Check starting sentinel — skip health check if agent is in restart window.
+        # Written by bin/restart-agent at the very start; cleared by main.py once
+        # the process is healthy and listening on its port.
+        _sentinel = Path(f"/tmp/{name}_starting")
+        if _sentinel.exists():
+            try:
+                _sentinel_age = time.time() - _sentinel.stat().st_mtime
+            except OSError:
+                _sentinel_age = 9999
+            if _sentinel_age < 300:  # 5-minute window
+                log(f"  ⏳ {name}:{port} — restart in progress (sentinel {int(_sentinel_age)}s old), skipping health check")
+                up.append(name)  # treat as up to avoid spurious alerts
+                continue
+            else:
+                log(f"  {name}:{port} — stale starting sentinel ({int(_sentinel_age)}s old), clearing and checking health")
+                try:
+                    _sentinel.unlink()
+                except OSError:
+                    pass
+
         healthy, detail, bots = ping_agent(name, port)
 
         if healthy:

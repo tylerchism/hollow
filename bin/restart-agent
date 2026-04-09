@@ -49,6 +49,15 @@ PORT="${2:?restart-agent: PORT is required}"
 shift 2
 LAUNCH_CMD=("$@")
 
+# ── Starting sentinel: block watchdog health checks during restart ────────────
+# Written before any process is killed so the watchdog skips this agent during
+# the entire restart window. The new process removes the sentinel from main.py
+# once it has successfully bound to its port. If main.py never starts, the
+# watchdog treats the sentinel as stale after 5 minutes and resumes checks.
+SENTINEL_FILE="/tmp/${NAME}_starting"
+printf '%s' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$SENTINEL_FILE"
+echo "[restart-agent:$NAME] Starting sentinel written to $SENTINEL_FILE"
+
 if [ ${#LAUNCH_CMD[@]} -eq 0 ]; then
   echo "[restart-agent:$NAME] ERROR: LAUNCH_CMD is empty. Nothing to start." >&2
   exit 1
