@@ -1,0 +1,311 @@
+#!/usr/bin/env python3
+"""Ingest URLs from the #sources Discord channel into agent-memory/wiki/sources-YYYY-MM.md.
+
+Fetches messages from #sources, filters for ones without a bot ✅ reaction,
+fetches the URL content, writes a structured entry to the monthly sources file,
+and marks the message as processed with a ✅ reaction.
+
+Usage:
+    ingest-sources [--dry-run]
+
+Reads DISCORD_BOT_TOKEN from agents/tarn/.env (or environment).
+SOURCES_CHANNEL_ID can be set in environment or falls back to the hardcoded default.
+
+Supply chain rules: stdlib only — no new packages.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import re
+import sys
+import urllib.error
+import urllib.parse
+import urllib.request
+from datetime import datetime, timezone
+from pathlib import Path
+
+HOLLOW_ROOT = Path(__file__).parent.parent.resolve()
+SOURCES_CHANNEL_ID_DEFAULT = "1491646218797977690"
+WIKI_DIR = HOLLOW_ROOT / "agent-memory" / "wiki"
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
+
+
+def _load_env_file(path: Path) -> dict[str, str]:
+    """Parse KEY=VALUE pairs from a .env file, ignoring comments and blank lines."""
+    env: dict[str, str] = {}
+    if not path.exists():
+        return env
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "=" in line:
+            key, _, val = line.partition("=")
+            # Strip surrounding quotes if present
+            val = val.strip()
+            if len(val) >= 2 and val[0] in ('"', "'") and val[-1] == val[0]:
+                val = val[1:-1]
+            env[key.strip()] = val
+    return env
+
+
+def _discord_request(
+    method: str,
+    path: str,
+    token: str,
+    payload: dict | None = None,
+    timeout: int = 15,
+) -> dict | list | None:
+    """Make a Discord REST API call. Returns parsed JSON or None on failure."""
+    url = f"https://discord.com/api/v10{path}"
+    data = json.dumps(payload).encode() if payload is not None else None
+    headers = {
+        "Authorization": f"Bot {token}",
+        "User-Agent": "HollowBot/1.0",
+        "Content-Type": "application/json",
+    }
+    req = urllib.request.Request(url, data=data, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            body = resp.read()
+            if body:
+                return json.loads(body.decode("utf-8"))
+            return {}
+    except urllib.error.HTTPError as exc:
+        # 204 No Content is success (used by reaction PUT)
+        if exc.code == 204:
+            return {}
+        print(f"[discord] HTTP {exc.code} for {method} {path}: {exc.read()[:200]}", file=sys.stderr)
+        return None
+    except Exception as exc:
+        print(f"[discord] request error for {method} {path}: {exc}", file=sys.stderr)
+        return None
+
+
+def _fetch_messages(channel_id: str, token: str, limit: int = 50) -> list[dict]:
+    """Fetch recent messages from a Discord channel."""
+    result = _discord_request("GET", f"/channels/{channel_id}/messages?limit={limit}", token)
+    if isinstance(result, list):
+        return result
+    return []
+
+
+def _get_reactions(channel_id: str, message_id: str, emoji: str, token: str) -> list[dict]:
+    """Get list of users who reacted with emoji on a message."""
+    encoded = urllib.parse.quote(emoji, safe="")
+    result = _discord_request("GET", f"/channels/{channel_id}/messages/{message_id}/reactions/{encoded}", token)
+    if isinstance(result, list):
+        return result
+    return []
+
+
+def _get_bot_user(token: str) -> str | None:
+    """Fetch the bot's own user ID."""
+    result = _discord_request("GET", "/users/@me", token)
+    if isinstance(result, dict):
+        return result.get("id")
+    return None
+
+
+def _add_reaction(channel_id: str, message_id: str, emoji: str, token: str) -> bool:
+    """Add a reaction to a message. Returns True on success."""
+    encoded = urllib.parse.quote(emoji, safe="")
+    result = _discord_request("PUT", f"/channels/{channel_id}/messages/{message_id}/reactions/{encoded}/@me", token)
+    return result is not None
+
+
+def _fetch_url_content(url: str, timeout: int = 20) -> str | None:
+    """Fetch text content from a URL using urllib. Returns plain text or None."""
+    headers = {
+        "User-Agent": "Mozilla/5.0 (compatible; HollowBot/1.0)",
+        "Accept": "text/html,application/xhtml+xml,text/plain;q=0.9,*/*;q=0.8",
+    }
+    req = urllib.request.Request(url, headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            content_type = resp.headers.get("Content-Type", "").lower()
+            raw = resp.read(50_000)  # cap at 50 KB
+            charset = "utf-8"
+            m = re.search(r"charset=([^\s;]+)", content_type)
+            if m:
+                charset = m.group(1).strip('"\'')
+            text = raw.decode(charset, errors="replace")
+            # Strip HTML tags for a rough plain-text extraction
+            text = re.sub(r"<script[^>]*>.*?</script>", " ", text, flags=re.DOTALL | re.IGNORECASE)
+            text = re.sub(r"<style[^>]*>.*?</style>", " ", text, flags=re.DOTALL | re.IGNORECASE)
+            text = re.sub(r"<[^>]+>", " ", text)
+            text = re.sub(r"\s{3,}", "\n\n", text)
+            return text.strip()[:3000]  # cap output at 3000 chars
+    except Exception as exc:
+        print(f"[fetch] failed to fetch {url}: {exc}", file=sys.stderr)
+        return None
+
+
+def _extract_urls(text: str) -> list[str]:
+    """Extract all http/https URLs from a string."""
+    return re.findall(r"https?://[^\s<>\"']+", text)
+
+
+def _sources_file_path(dt: datetime) -> Path:
+    """Return the wiki/sources-YYYY-MM.md path for the given datetime."""
+    return WIKI_DIR / f"sources-{dt.strftime('%Y-%m')}.md"
+
+
+def _append_source_entry(
+    path: Path,
+    url: str,
+    message_content: str,
+    message_author: str,
+    message_ts: str,
+    content_snippet: str | None,
+    dry_run: bool,
+) -> None:
+    """Append a structured entry to the monthly sources file."""
+    entry_lines = [
+        f"\n## {url}",
+        f"",
+        f"- **Added by:** {message_author}",
+        f"- **Discord message timestamp:** {message_ts}",
+        f"- **Original message:** {message_content[:300]}",
+    ]
+    if content_snippet:
+        entry_lines += [
+            f"",
+            f"**Content snippet:**",
+            f"",
+            f"> {content_snippet[:500].replace(chr(10), chr(10) + '> ')}",
+        ]
+    entry_lines.append("")
+    entry_text = "\n".join(entry_lines)
+
+    if dry_run:
+        print(f"[dry-run] Would write to {path}:\n{entry_text}")
+        return
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    # Write header if file is new
+    if not path.exists():
+        header = f"# Sources — {datetime.now(timezone.utc).strftime('%B %Y')}\n\nAuto-ingested from #sources Discord channel.\n"
+        path.write_text(header, encoding="utf-8")
+
+    with path.open("a", encoding="utf-8") as f:
+        f.write(entry_text)
+
+
+# ── Main ──────────────────────────────────────────────────────────────────────
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Ingest URLs from the #sources Discord channel.")
+    parser.add_argument("--dry-run", action="store_true", help="Print what would be done; no writes or reactions")
+    args = parser.parse_args()
+
+    # Load token from env file first, then fall back to environment
+    env_file = HOLLOW_ROOT / "agents" / "tarn" / ".env"
+    file_env = _load_env_file(env_file)
+
+    token = os.environ.get("DISCORD_BOT_TOKEN") or file_env.get("DISCORD_BOT_TOKEN")
+    if not token:
+        print("ERROR: DISCORD_BOT_TOKEN not found in environment or agents/tarn/.env", file=sys.stderr)
+        sys.exit(1)
+
+    channel_id = os.environ.get("SOURCES_CHANNEL_ID") or SOURCES_CHANNEL_ID_DEFAULT
+
+    print(f"[ingest-sources] channel_id={channel_id} dry_run={args.dry_run}")
+
+    # Get bot's own user ID so we can check if we already reacted
+    bot_user_id = _get_bot_user(token)
+    if not bot_user_id:
+        print("ERROR: could not fetch bot user ID — check token", file=sys.stderr)
+        sys.exit(1)
+    print(f"[ingest-sources] bot_user_id={bot_user_id}")
+
+    messages = _fetch_messages(channel_id, token, limit=50)
+    if not messages:
+        print("[ingest-sources] no messages found or fetch failed")
+        return
+
+    print(f"[ingest-sources] fetched {len(messages)} messages")
+
+    processed = 0
+    skipped = 0
+    now = datetime.now(timezone.utc)
+
+    for msg in messages:
+        msg_id = msg.get("id", "")
+        msg_content = msg.get("content", "")
+        msg_author = msg.get("author", {}).get("username", "unknown")
+        msg_ts = msg.get("timestamp", "")
+
+        # Check if bot already reacted with ✅
+        reactions = msg.get("reactions", [])
+        already_done = False
+        for reaction in reactions:
+            emoji_data = reaction.get("emoji", {})
+            if emoji_data.get("name") == "✅" and reaction.get("me", False):
+                already_done = True
+                break
+
+        if already_done:
+            skipped += 1
+            continue
+
+        # If reaction data not in message payload, check via API
+        # (reactions not always included in message list payload)
+        if not already_done and reactions == []:
+            reactors = _get_reactions(channel_id, msg_id, "✅", token)
+            if any(r.get("id") == bot_user_id for r in reactors):
+                already_done = True
+                skipped += 1
+                continue
+
+        urls = _extract_urls(msg_content)
+        if not urls:
+            # No URLs — skip but still mark to avoid re-checking
+            skipped += 1
+            continue
+
+        print(f"[ingest-sources] processing message {msg_id} with {len(urls)} URL(s)")
+
+        for url in urls:
+            print(f"[ingest-sources]   fetching {url}")
+            content_snippet = _fetch_url_content(url)
+
+            # Parse message timestamp for file routing
+            try:
+                msg_dt = datetime.fromisoformat(msg_ts.replace("Z", "+00:00"))
+            except Exception:
+                msg_dt = now
+
+            sources_path = _sources_file_path(msg_dt)
+            _append_source_entry(
+                path=sources_path,
+                url=url,
+                message_content=msg_content,
+                message_author=msg_author,
+                message_ts=msg_ts,
+                content_snippet=content_snippet,
+                dry_run=args.dry_run,
+            )
+
+        # Mark as processed with ✅ reaction
+        if not args.dry_run:
+            ok = _add_reaction(channel_id, msg_id, "✅", token)
+            if ok:
+                print(f"[ingest-sources]   marked message {msg_id} as processed")
+            else:
+                print(f"[ingest-sources]   WARNING: failed to add reaction to message {msg_id}", file=sys.stderr)
+        else:
+            print(f"[dry-run] Would add ✅ reaction to message {msg_id}")
+
+        processed += 1
+
+    print(f"[ingest-sources] done — processed={processed} skipped={skipped}")
+
+
+if __name__ == "__main__":
+    main()
