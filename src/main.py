@@ -1072,6 +1072,94 @@ def _format_snapshot_context(snapshot: dict | None) -> str:
     )
 
 
+async def _detect_unanswered_message(agent, chat_id: str) -> str | None:
+    """Check if Tyler's last message was not substantively answered.
+
+    Returns the unanswered message text if Tyler's last message was followed
+    only by startup/I'm-back type messages (or no reply at all). Returns None
+    if the last message was properly answered or no history exists.
+    """
+    try:
+        cursor = await agent.history._db.execute(
+            "SELECT role, content FROM chat_sessions "
+            "WHERE chat_id = ? AND session_key = '' "
+            "ORDER BY created_at DESC LIMIT 10",
+            (chat_id,),
+        )
+        rows = await cursor.fetchall()
+        if not rows:
+            return None
+
+        # Reverse to chronological order (oldest first)
+        rows = list(reversed(rows))
+
+        # Find the last user message index
+        last_user_idx = None
+        for i, (role, _content) in enumerate(rows):
+            if role == "user":
+                last_user_idx = i
+
+        if last_user_idx is None:
+            return None
+
+        last_user_msg = rows[last_user_idx][1].strip()
+
+        # Skip trivial messages (too short to be meaningful)
+        if len(last_user_msg) < 10:
+            return None
+
+        # Check what assistant messages followed the last user message
+        subsequent_assistant = [
+            content for role, content in rows[last_user_idx + 1:]
+            if role == "assistant"
+        ]
+
+        if not subsequent_assistant:
+            # No reply at all — definitely unanswered
+            return last_user_msg
+
+        # Check if all subsequent assistant messages look like startup/I'm-back messages
+        STARTUP_PHRASES = (
+            "back up.", "back up,", "i'm back", "maintenance restart", "restart complete",
+            "back online", "restarted.", "ready to continue", "back — ready",
+            "picking up where", "back and ready", "🔄", "back.",
+        )
+        all_startup = all(
+            any(phrase in msg.lower() for phrase in STARTUP_PHRASES)
+            for msg in subsequent_assistant
+        )
+
+        return last_user_msg if all_startup else None
+    except Exception:
+        log.debug("_detect_unanswered_message failed for %s", chat_id, exc_info=True)
+        return None
+
+
+def _is_restart_request(msg: str) -> bool:
+    """Return True if msg appears to be asking Tarn to restart itself."""
+    lower = msg.lower()
+    return any(kw in lower for kw in (
+        "restart yourself", "restart tarn", "restart the bot", "restart-tarn",
+        "restart-agent", "reboot yourself", "bin/restart",
+    ))
+
+
+def _has_pending_restart_request(config, since_ts: float) -> bool:
+    """Return True if pending-restart.md exists and was modified after since_ts.
+
+    This is the guard against restart loops: if Tyler's unanswered message was
+    a restart request, we only re-queue it if there's an explicit pending-restart.md
+    file with a timestamp newer than the current restart.
+    """
+    try:
+        _pending = config.memory_dir / "pending-restart.md"
+        if _pending.exists():
+            return _pending.stat().st_mtime > since_ts
+    except Exception:
+        pass
+    return False
+
+
 async def _send_startup_notification(config, agent, discord_bot) -> None:
     """On restart: review recent context per-channel and proactively continue work.
 
@@ -1226,17 +1314,27 @@ async def _send_startup_notification(config, agent, discord_bot) -> None:
 
         Uses gemma4:e4b via Ollama instead of Claude API to avoid token burn on restart.
         Falls back to a static "I'm back" message if Ollama is unavailable.
+        Detects unanswered Tyler messages and queues them for actual agent processing.
         """
+        import time as _time
+
         # If there's already a recent assistant reply, skip to avoid doubling.
         if await _channel_already_responded(agent, chat_id, elapsed_seconds=300):
             log.info("Startup: channel %s already has a recent reply — skipping", chat_id)
             return
 
+        # Detect if Tyler's last message went unanswered before the restart
+        unanswered_msg = await _detect_unanswered_message(agent, chat_id)
+        if unanswered_msg:
+            log.info(
+                "Startup: channel %s has unanswered message (%.60s...)",
+                chat_id, unanswered_msg,
+            )
+
         recent_history = await _load_recent_conversation(agent, chat_id)
         prompt = _build_startup_prompt(recent_history, snapshot_context)
 
         # Lean-mode: use local Ollama instead of Claude API to save tokens.
-        # Prompt uses recency-first reasoning to avoid older high-volume topics dominating.
         ollama_model = "gemma4:e4b"
         lean_prompt = (
             "You are reviewing recent conversation messages to determine what work is currently most important/active.\n\n"
@@ -1244,12 +1342,30 @@ async def _send_startup_notification(config, agent, discord_bot) -> None:
         )
         if recent_history:
             lean_prompt += recent_history + "\n\n"
+        if unanswered_msg:
+            lean_prompt += (
+                f"NOTE: The following user message was sent right before the restart and "
+                f"has not been substantively answered yet: \"{unanswered_msg[:200]}\"\n\n"
+            )
         lean_prompt += (
             "Based on these messages, what is the single most important thing currently in progress or recently requested? "
             "Focus on the MOST RECENT incomplete task or request, not the one with the most message volume. "
             "Provide a 1-2 sentence summary of what Tarn should pick up. "
             "Be specific and terse. Do not use markdown."
         )
+
+        # Build unanswered-message prefix for the startup response
+        def _unanswered_prefix() -> str:
+            if not unanswered_msg:
+                return ""
+            snippet = unanswered_msg[:100] + ("..." if len(unanswered_msg) > 100 else "")
+            return f"Before I get into restart context — you asked: \"{snippet}\" right before I went down. Picking that up now.\n\n"
+
+        def _fallback_msg() -> str:
+            if unanswered_msg:
+                snippet = unanswered_msg[:100] + ("..." if len(unanswered_msg) > 100 else "")
+                return f"Back — saw you asked: \"{snippet}\". Picking that up now."
+            return "I'm back — ready to continue. What are we working on?"
 
         try:
             response = await asyncio.wait_for(
@@ -1258,16 +1374,52 @@ async def _send_startup_notification(config, agent, discord_bot) -> None:
             )
             if response and response.strip():
                 log.info("Startup: Ollama context review succeeded for channel %s", chat_id)
-                await send_fn(response)
+                await send_fn(_unanswered_prefix() + response)
             else:
                 log.warning("Startup: Ollama returned empty response for channel %s — using fallback", chat_id)
-                await send_fn("I'm back — ready to continue. What are we working on?")
+                await send_fn(_fallback_msg())
         except asyncio.TimeoutError:
             log.warning("Startup context review (Ollama) timed out for channel %s", chat_id)
-            await send_fn("I'm back — ready to continue. What are we working on?")
+            await send_fn(_fallback_msg())
         except Exception:
             log.exception("Failed to run startup context review for channel %s", chat_id)
-            await send_fn("I'm back — ready to continue. What are we working on?")
+            await send_fn(_fallback_msg())
+
+        # Queue the unanswered message for actual agent processing
+        if unanswered_msg:
+            # Restart-loop guard: don't auto-execute restart requests unless
+            # pending-restart.md explicitly lists one newer than this startup.
+            _startup_ts = _time.time() - 120  # generous: started within last 2 minutes
+            if _is_restart_request(unanswered_msg) and not _has_pending_restart_request(config, _startup_ts):
+                log.info(
+                    "Startup: skipping re-queue of restart request in channel %s "
+                    "(loop guard: no pending-restart.md entry)",
+                    chat_id,
+                )
+            else:
+                log.info("Startup: queuing unanswered message for agent processing in channel %s", chat_id)
+
+                async def _unanswered_deliver(text: str) -> None:
+                    await send_fn(text)
+
+                async def _unanswered_error(exc: Exception) -> None:
+                    log.error(
+                        "Startup: failed to process unanswered message in channel %s: %s",
+                        chat_id, exc,
+                    )
+
+                _unanswered_task = asyncio.create_task(
+                    agent.reply(message=unanswered_msg, chat_id=chat_id, is_main_session=True)
+                )
+                if discord_bot and hasattr(discord_bot, "_bg_tasks"):
+                    discord_bot._bg_tasks.register(
+                        task=_unanswered_task,
+                        deliver_fn=_unanswered_deliver,
+                        error_fn=_unanswered_error,
+                        channel_type="discord",
+                        channel_id=chat_id,
+                        original_message=unanswered_msg,
+                    )
 
     # ── Origin-channel routing decision ───────────────────────────────────────
     # If origin_channel_id is set: the agent itself triggered the restart from a
@@ -1408,6 +1560,18 @@ async def run(args: argparse.Namespace = None):
                 pass
             await asyncio.sleep(1.5)
     log.info("HTTP API listening on http://%s:%d", config.api_host, config.api_port)
+
+    # Remove the starting sentinel once we are bound and listening —
+    # this signals the watchdog that startup succeeded and it is safe to
+    # resume health checks for this agent.
+    _sentinel_agent_name = config.identity_dir.name if config.identity_dir else None
+    if _sentinel_agent_name:
+        _sentinel_file = Path(f"/tmp/{_sentinel_agent_name}_starting")
+        try:
+            _sentinel_file.unlink(missing_ok=True)
+            log.debug("Removed starting sentinel %s", _sentinel_file)
+        except Exception:
+            log.debug("Could not remove starting sentinel %s", _sentinel_file, exc_info=True)
 
     stop_event = asyncio.Event()
 
