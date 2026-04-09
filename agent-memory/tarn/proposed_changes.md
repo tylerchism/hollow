@@ -293,3 +293,17 @@ Each entry must include:
 **Status**: applied  
 **Proposed**: 2026-04-07  
 **Applied by**: Forge (Claude Code) 2026-04-07
+
+---
+
+### crons.json: Enable sources_ingestion cron
+
+**File**: `agent-memory/tarn/crons.json`
+
+**Change**: `sources_ingestion` entry `enabled` field: `false` → `true`
+
+**Reason**: The #sources Discord channel has been created (ID 1491646218797977690) and the `bin/ingest-sources` script was built and tested. Tyler confirmed the channel is ready by creating it. Enabling the cron activates the 2-hour ingest schedule.
+
+**Status**: applied  
+**Proposed**: 2026-04-09  
+**Applied by**: Forge (Claude Code) 2026-04-09 (retroactive — change was made during system-cleanup execution)

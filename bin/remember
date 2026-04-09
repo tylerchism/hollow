@@ -1,0 +1,289 @@
+#!/usr/bin/env python3
+"""Structured memory write tool — stores facts, preferences, decisions, entities.
+
+Usage:
+    bin/remember "text to remember" --type=TYPE [--source SOURCE]
+                 [--confidence high|medium|low] [--entity-name NAME]
+
+Types:
+    preference    Tyler's stated preference → wiki/raw/preferences.md
+    decision      A decision Tyler made → wiki/raw/decisions.md
+    entity        A notable entity → wiki/raw/entities.md + graph DB
+    relationship  A connection between entities → graph DB + wiki/raw/relationships.md
+    fact          A general fact → wiki/raw/facts.md
+    correction    Corrects a previous entry → wiki/raw/corrections.md
+
+Output: JSON confirmation to stdout.
+
+Deduplication: content is hashed — identical entries are silently skipped.
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import os
+import re
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+HOLLOW_ROOT = Path(__file__).parent.parent.resolve()
+sys.path.insert(0, str(HOLLOW_ROOT))
+
+from src.memory.knowledge_graph import (
+    ensure_graph_schema,
+    upsert_entity,
+    add_relationship,
+    add_source,
+    DEFAULT_GRAPH_DB,
+)
+
+WIKI_RAW_DIR = HOLLOW_ROOT / "agent-memory" / "wiki" / "raw"
+
+# Map type -> raw file name
+TYPE_TO_FILE: dict[str, str] = {
+    "preference": "preferences.md",
+    "decision": "decisions.md",
+    "entity": "entities.md",
+    "relationship": "relationships.md",
+    "fact": "facts.md",
+    "correction": "corrections.md",
+}
+
+VALID_TYPES = set(TYPE_TO_FILE.keys())
+VALID_CONFIDENCES = {"high", "medium", "low"}
+
+
+def _content_hash(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
+
+
+def _iso_timestamp() -> str:
+    return datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _is_duplicate(raw_file: Path, content_hash: str) -> bool:
+    """Check if a content hash already exists in the target file."""
+    if not raw_file.exists():
+        return False
+    text = raw_file.read_text(encoding="utf-8")
+    return f"**content_hash:** {content_hash}" in text
+
+
+def _write_raw_entry(
+    raw_file: Path,
+    content: str,
+    entry_type: str,
+    source: str,
+    confidence: str,
+    agent: str,
+    content_hash: str,
+    supersedes: str | None = None,
+) -> None:
+    """Append a structured entry to a raw wiki file."""
+    WIKI_RAW_DIR.mkdir(parents=True, exist_ok=True)
+    timestamp = _iso_timestamp()
+
+    lines = [
+        f"## [{timestamp}] {entry_type}",
+        "",
+        content,
+        "",
+        f"- **Type:** {entry_type}",
+        f"- **Source:** {source}",
+        f"- **Confidence:** {confidence}",
+        f"- **Agent:** {agent}",
+        f"- **content_hash:** {content_hash}",
+    ]
+    if supersedes:
+        lines.append(f"- **Supersedes:** {supersedes}")
+
+    lines.append("")
+    lines.append("---")
+    lines.append("")
+
+    entry_text = "\n".join(lines)
+
+    # Append to file (create header if new)
+    if not raw_file.exists():
+        header = f"# {entry_type.title()} Raw Entries\n\n"
+        raw_file.write_text(header + entry_text, encoding="utf-8")
+    else:
+        with raw_file.open("a", encoding="utf-8") as f:
+            f.write(entry_text)
+
+
+def _extract_entity_name(content: str, entity_name_override: str | None) -> str | None:
+    """Try to extract entity name from content text for graph writes."""
+    if entity_name_override:
+        return entity_name_override
+    # Heuristic: look for text before " -- " or " - " delimiter (entity -- description)
+    if " -- " in content:
+        return content.split(" -- ", 1)[0].strip()
+    if " - " in content:
+        return content.split(" - ", 1)[0].strip()
+    # Capitalize sequences: first 3 words if they look like a noun phrase
+    words = content.split()
+    if words:
+        candidate = " ".join(words[:3]).rstrip(".,;:!?")
+        return candidate
+    return None
+
+
+def _extract_relationship_entities(content: str) -> tuple[str | None, str | None, str]:
+    """Parse 'Entity A <verb> Entity B <as/context>...' heuristic.
+
+    Returns (entity_a, entity_b, label).
+    """
+    # Try pattern: "<Entity A> <label> <Entity B>"
+    # e.g. "Daniel Vitalis discusses cold thermogenesis as a mitochondrial uncoupling trigger"
+    rel_verbs = ["discusses", "recommends", "contradicts", "prefers", "relates to",
+                 "relates_to", "mentions", "uses", "produces", "inhibits", "promotes"]
+
+    content_lower = content.lower()
+    for verb in rel_verbs:
+        if verb in content_lower:
+            parts = re.split(re.escape(verb), content, flags=re.IGNORECASE, maxsplit=1)
+            if len(parts) == 2:
+                entity_a = parts[0].strip().rstrip()
+                remainder = parts[1].strip()
+                # entity_b is first phrase before "as", "for", "in", "which", comma
+                entity_b_match = re.match(r"([^,\.]+?)(?:\s+(?:as|for|in|which|that)\b|$)", remainder)
+                entity_b = entity_b_match.group(1).strip() if entity_b_match else remainder[:50]
+                label = verb.replace(" ", "_")
+                return entity_a or None, entity_b or None, label
+
+    return None, None, "relates_to"
+
+
+def _write_to_graph_entity(
+    content: str,
+    entity_name_override: str | None,
+    content_hash: str,
+) -> bool:
+    """Write an entity entry to the knowledge graph. Returns True if written."""
+    entity_name = _extract_entity_name(content, entity_name_override)
+    if not entity_name:
+        return False
+
+    # Description is everything after the delimiter, or the full content
+    if " -- " in content:
+        description = content.split(" -- ", 1)[1].strip()
+    elif " - " in content and entity_name_override:
+        description = content.split(" - ", 1)[1].strip() if " - " in content else content
+    else:
+        description = content
+
+    try:
+        conn = ensure_graph_schema(DEFAULT_GRAPH_DB)
+        entity_id = upsert_entity(conn, entity_name, "unknown", description)
+        add_source(conn, entity_id, "remember_entry", content_hash)
+        conn.close()
+        return True
+    except Exception:
+        return False
+
+
+def _write_to_graph_relationship(content: str, content_hash: str) -> bool:
+    """Parse and write a relationship to the knowledge graph. Returns True if written."""
+    entity_a, entity_b, label = _extract_relationship_entities(content)
+    if not entity_a or not entity_b:
+        return False
+
+    try:
+        conn = ensure_graph_schema(DEFAULT_GRAPH_DB)
+        id_a = upsert_entity(conn, entity_a, "unknown")
+        id_b = upsert_entity(conn, entity_b, "unknown")
+        add_relationship(conn, id_a, id_b, label, context=content[:200])
+        add_source(conn, id_a, "remember_entry", content_hash)
+        conn.close()
+        return True
+    except Exception:
+        return False
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Store a structured memory entry for nightly consolidation."
+    )
+    parser.add_argument("content", nargs="?", default=None,
+                        help="Text to remember")
+    parser.add_argument("--type", required=True, dest="entry_type",
+                        choices=sorted(VALID_TYPES),
+                        help="Entry type: preference, decision, entity, relationship, fact, correction")
+    parser.add_argument("--source", default="conversation",
+                        help="Source identifier (default: conversation)")
+    parser.add_argument("--confidence", default="medium",
+                        choices=sorted(VALID_CONFIDENCES),
+                        help="Confidence level (default: medium)")
+    parser.add_argument("--entity-name", default=None, dest="entity_name",
+                        help="Explicit entity name (for --type=entity)")
+    parser.add_argument("--supersedes", default=None,
+                        help="Content hash of entry this corrects (for --type=correction)")
+    parser.add_argument("--verbose", action="store_true")
+
+    args = parser.parse_args()
+
+    content = args.content
+    if not content or not content.strip():
+        print(json.dumps({"stored": False, "reason": "empty content"}), indent=2)
+        sys.exit(1)
+
+    content = content.strip()
+    agent = os.getenv("HOLLOW_AGENT", "unknown")
+    content_hash = _content_hash(content)
+
+    target_filename = TYPE_TO_FILE[args.entry_type]
+    raw_file = WIKI_RAW_DIR / target_filename
+
+    # Deduplication check
+    if _is_duplicate(raw_file, content_hash):
+        result = {
+            "stored": False,
+            "reason": "duplicate",
+            "content_hash": content_hash,
+            "type": args.entry_type,
+        }
+        print(json.dumps(result, indent=2))
+        return
+
+    written_to = []
+    graph_updated = False
+
+    # Write to wiki/raw/
+    _write_raw_entry(
+        raw_file=raw_file,
+        content=content,
+        entry_type=args.entry_type,
+        source=args.source,
+        confidence=args.confidence,
+        agent=agent,
+        content_hash=content_hash,
+        supersedes=args.supersedes,
+    )
+    written_to.append(str(raw_file.relative_to(HOLLOW_ROOT)))
+
+    # For entity/relationship types, also write to graph DB
+    if args.entry_type == "entity":
+        graph_updated = _write_to_graph_entity(content, args.entity_name, content_hash)
+    elif args.entry_type == "relationship":
+        graph_updated = _write_to_graph_relationship(content, content_hash)
+
+    result = {
+        "stored": True,
+        "type": args.entry_type,
+        "content_hash": content_hash,
+        "written_to": written_to,
+        "graph_updated": graph_updated,
+        "timestamp": _iso_timestamp(),
+    }
+    if args.entry_type == "correction" and args.supersedes:
+        result["supersedes"] = args.supersedes
+
+    print(json.dumps(result, indent=2))
+
+
+if __name__ == "__main__":
+    main()

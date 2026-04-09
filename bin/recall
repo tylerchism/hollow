@@ -1,0 +1,363 @@
+#!/usr/bin/env python3
+"""Unified knowledge retrieval — searches wiki, corpus, and entity graph.
+
+Usage:
+    bin/recall "query text" [--top-k N] [--sources wiki,corpus,graph]
+               [--person SLUG] [--no-embed]
+
+Output: JSON to stdout with ranked results from all enabled sources.
+
+Sources:
+    wiki    — agent-memory/wiki/*.md pages (keyword search)
+    corpus  — per-person expert corpus DBs (FTS5 + cosine)
+    graph   — entity graph DB at memory/knowledge-graph.db
+
+Graceful degradation:
+    - Ollama down → keyword-only search (no crash)
+    - knowledge-graph.db missing → graph source skipped
+    - No corpus DBs → corpus source skipped
+    - Always returns something unless query is empty
+"""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import json
+import logging
+import os
+import re
+import sys
+import time
+from pathlib import Path
+
+HOLLOW_ROOT = Path(__file__).parent.parent.resolve()
+sys.path.insert(0, str(HOLLOW_ROOT))
+
+from src.memory.embeddings import OllamaEmbeddingClient
+from src.memory.schema import ensure_schema
+from src.memory.search import Searcher
+from src.memory.knowledge_graph import (
+    ensure_graph_schema,
+    search_entities,
+    get_related,
+)
+
+log = logging.getLogger("recall")
+
+DEFAULT_DATA_DIR = Path(os.getenv("DATA_DIR", "/home/tchism/data"))
+DEFAULT_GRAPH_DB = HOLLOW_ROOT / "memory" / "knowledge-graph.db"
+WIKI_DIR = HOLLOW_ROOT / "agent-memory" / "wiki"
+
+# Source weight tuning
+CORPUS_WEIGHT = 0.40
+WIKI_WEIGHT = 0.35
+GRAPH_WEIGHT = 0.25
+
+STOP_WORDS = frozenset(
+    "a an and are as at be by for from has have i in is it its of on or "
+    "that the to was were will with you your".split()
+)
+
+
+# ---------------------------------------------------------------------------
+# Wiki search
+# ---------------------------------------------------------------------------
+
+def _wiki_keyword_search(query: str, top_k: int) -> list[dict]:
+    """Search wiki pages by grepping for query tokens in .md files."""
+    if not WIKI_DIR.exists():
+        return []
+
+    tokens = [t.lower() for t in re.findall(r"[a-zA-Z0-9]+", query)
+              if t.lower() not in STOP_WORDS]
+    if not tokens:
+        tokens = re.findall(r"[a-zA-Z0-9]+", query)
+    if not tokens:
+        return []
+
+    results = []
+    md_files = list(WIKI_DIR.rglob("*.md"))
+
+    for md_path in md_files:
+        if md_path.name == "MEMORY.md":
+            continue
+        try:
+            text = md_path.read_text(encoding="utf-8")
+        except Exception:
+            continue
+
+        text_lower = text.lower()
+        # Score by how many tokens match
+        match_count = sum(1 for t in tokens if t in text_lower)
+        if match_count == 0:
+            continue
+
+        # Extract best matching excerpt (up to 300 chars around first match)
+        excerpt = _extract_excerpt(text, tokens)
+        rel_path = str(md_path.relative_to(HOLLOW_ROOT))
+
+        results.append(
+            {
+                "source": "wiki",
+                "page": rel_path,
+                "text": excerpt,
+                "score": match_count / len(tokens),  # raw, normalized later
+            }
+        )
+
+    results.sort(key=lambda x: x["score"], reverse=True)
+    return results[:top_k * 2]
+
+
+def _extract_excerpt(text: str, tokens: list[str], window: int = 300) -> str:
+    """Extract a passage around the first token match."""
+    text_lower = text.lower()
+    best_pos = len(text)
+    for t in tokens:
+        pos = text_lower.find(t)
+        if pos != -1 and pos < best_pos:
+            best_pos = pos
+
+    if best_pos == len(text):
+        return text[:window]
+
+    start = max(0, best_pos - window // 3)
+    end = min(len(text), start + window)
+    excerpt = text[start:end].strip()
+    if start > 0:
+        excerpt = "..." + excerpt
+    if end < len(text):
+        excerpt = excerpt + "..."
+    return excerpt
+
+
+# ---------------------------------------------------------------------------
+# Corpus search (reuses bin/retrieve logic)
+# ---------------------------------------------------------------------------
+
+def _resolve_corpus_dbs(person: str | None, data_dir: Path) -> list[Path]:
+    corpus_root = data_dir / "corpus"
+    if person:
+        p = corpus_root / person / "memory.db"
+        return [p] if p.exists() else []
+    if not corpus_root.exists():
+        return []
+    return sorted(p for p in corpus_root.glob("*/memory.db") if p.is_file())
+
+
+async def _corpus_search(
+    query: str,
+    top_k: int,
+    person: str | None,
+    data_dir: Path,
+    embed_client: OllamaEmbeddingClient | None,
+) -> list[dict]:
+    db_paths = _resolve_corpus_dbs(person, data_dir)
+    if not db_paths:
+        return []
+
+    all_results = []
+    for db_path in db_paths:
+        conn = ensure_schema(db_path)
+        try:
+            searcher = Searcher(conn=conn, embedding_client=embed_client)
+            raw = await searcher.search(query, limit=top_k * 2)
+            for r in raw:
+                content_hash_row = conn.execute(
+                    "SELECT content_hash FROM chunks WHERE file_path = ? AND start_line = ?",
+                    (r.file_path, r.start_line),
+                ).fetchone()
+                chunk_id = content_hash_row["content_hash"][:12] if content_hash_row else "unknown"
+                all_results.append(
+                    {
+                        "source": "corpus",
+                        "person": r.person,
+                        "text": r.text,
+                        "score": r.score,
+                        "source_title": r.source_title,
+                        "source_url": r.source_url,
+                        "chunk_id": chunk_id,
+                        "date": r.date,
+                    }
+                )
+        finally:
+            conn.close()
+
+    all_results.sort(key=lambda x: x["score"], reverse=True)
+    return all_results[:top_k * 2]
+
+
+# ---------------------------------------------------------------------------
+# Graph search
+# ---------------------------------------------------------------------------
+
+def _graph_search(query: str, top_k: int) -> list[dict]:
+    if not DEFAULT_GRAPH_DB.exists():
+        return []
+
+    try:
+        conn = ensure_graph_schema(DEFAULT_GRAPH_DB)
+        entity_results = search_entities(conn, query, embedding_client=None, limit=top_k)
+        results = []
+        for ent in entity_results:
+            related = get_related(conn, ent["id"], depth=1)
+            results.append(
+                {
+                    "source": "graph",
+                    "entity": ent["name"],
+                    "type": ent["type"],
+                    "description": ent["description"] or "",
+                    "related": [
+                        {
+                            "name": r["name"],
+                            "label": r["label"],
+                            "type": r["type"],
+                        }
+                        for r in related
+                    ],
+                    "score": ent["score"],
+                }
+            )
+        conn.close()
+        return results
+    except Exception as e:
+        log.warning("Graph search failed: %s", e)
+        return []
+
+
+# ---------------------------------------------------------------------------
+# Score normalization and merge
+# ---------------------------------------------------------------------------
+
+def _normalize_scores(results: list[dict]) -> None:
+    """Min-max normalize score field in-place."""
+    if not results:
+        return
+    scores = [r["score"] for r in results]
+    min_s, max_s = min(scores), max(scores)
+    spread = max_s - min_s
+    if spread == 0:
+        for r in results:
+            r["score"] = 1.0 if max_s > 0 else 0.0
+    else:
+        for r in results:
+            r["score"] = (r["score"] - min_s) / spread
+
+
+def _merge_results(
+    wiki_results: list[dict],
+    corpus_results: list[dict],
+    graph_results: list[dict],
+    top_k: int,
+) -> list[dict]:
+    """Apply source weights, normalize, deduplicate, sort."""
+    _normalize_scores(wiki_results)
+    _normalize_scores(corpus_results)
+    _normalize_scores(graph_results)
+
+    for r in wiki_results:
+        r["score"] = r["score"] * WIKI_WEIGHT
+    for r in corpus_results:
+        r["score"] = r["score"] * CORPUS_WEIGHT
+    for r in graph_results:
+        r["score"] = r["score"] * GRAPH_WEIGHT
+
+    all_results = wiki_results + corpus_results + graph_results
+    all_results.sort(key=lambda x: x["score"], reverse=True)
+    return all_results[:top_k]
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+async def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Unified knowledge retrieval across wiki, corpus, and entity graph."
+    )
+    parser.add_argument("query", nargs="?", default=None, help="Search query text")
+    parser.add_argument("--query", dest="query_flag", default=None,
+                        help="Search query (alternative to positional arg)")
+    parser.add_argument("--top-k", type=int, default=10, dest="top_k",
+                        help="Max results to return (default: 10)")
+    parser.add_argument("--sources", default="wiki,corpus,graph",
+                        help="Comma-separated source list: wiki,corpus,graph")
+    parser.add_argument("--person", default=None,
+                        help="Restrict corpus to this person slug")
+    parser.add_argument("--no-embed", action="store_true",
+                        help="Disable vector search, keyword-only mode")
+    parser.add_argument("--data-dir", default=None, dest="data_dir")
+    parser.add_argument("--verbose", action="store_true")
+
+    args = parser.parse_args()
+
+    logging.basicConfig(
+        level=logging.DEBUG if args.verbose else logging.WARNING,
+        format="%(levelname)s %(name)s: %(message)s",
+    )
+
+    # Resolve query
+    query = args.query or args.query_flag
+    if not query or not query.strip():
+        print(json.dumps({"error": "Empty query", "results": []}, indent=2))
+        sys.exit(1)
+
+    sources = {s.strip() for s in args.sources.split(",") if s.strip()}
+    data_dir = Path(args.data_dir) if args.data_dir else DEFAULT_DATA_DIR
+
+    t_start = time.time()
+
+    # Set up embedding client
+    embed_client: OllamaEmbeddingClient | None = None
+    if not args.no_embed:
+        model = os.getenv("OLLAMA_EMBED_MODEL", "nomic-embed-text")
+        embed_client = OllamaEmbeddingClient(model=model)
+
+    try:
+        wiki_results: list[dict] = []
+        corpus_results: list[dict] = []
+        graph_results: list[dict] = []
+
+        sources_searched = 0
+
+        if "wiki" in sources:
+            wiki_results = _wiki_keyword_search(query, args.top_k)
+            if WIKI_DIR.exists():
+                sources_searched += len(list(WIKI_DIR.rglob("*.md")))
+
+        if "corpus" in sources:
+            corpus_results = await _corpus_search(
+                query, args.top_k, args.person, data_dir, embed_client
+            )
+            db_paths = _resolve_corpus_dbs(args.person, data_dir)
+            sources_searched += len(db_paths)
+
+        if "graph" in sources:
+            graph_results = _graph_search(query, args.top_k)
+            if DEFAULT_GRAPH_DB.exists():
+                sources_searched += 1
+
+        merged = _merge_results(wiki_results, corpus_results, graph_results, args.top_k)
+
+        # Round scores for clean output
+        for r in merged:
+            r["score"] = round(r["score"], 4)
+
+        elapsed_ms = int((time.time() - t_start) * 1000)
+
+        output = {
+            "query": query,
+            "results": merged,
+            "total_sources_searched": sources_searched,
+            "search_time_ms": elapsed_ms,
+        }
+        print(json.dumps(output, indent=2))
+
+    finally:
+        if embed_client:
+            await embed_client.close()
+
+
+if __name__ == "__main__":
+    asyncio.run(main())

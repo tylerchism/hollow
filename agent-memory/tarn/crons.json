@@ -194,7 +194,7 @@
     "name": "sources_ingestion",
     "schedule": "0 */2 * * *",
     "tz": "America/Chicago",
-    "enabled": false,
+    "enabled": true,
     "model": "claude-sonnet-4-6",
     "prompt": "Run bin/ingest-sources to process new URLs from the #sources Discord channel. Report how many were processed.",
     "is_main_session": false,
