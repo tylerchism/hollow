@@ -296,6 +296,20 @@ Each entry must include:
 
 ---
 
+## [2026-04-09] identity.md — Add Knowledge Tools section
+
+**Requested by**: Forge (knowledge-architecture plan KA-4)
+**Target file**: `agents/tarn/identity.md`
+**Change type**: add
+**Current content**: No Knowledge Tools section existed.
+**Proposed content**: Added "## Knowledge Tools" section: "Before answering questions about Tyler's preferences, past decisions, or topics he's discussed with experts, call `bin/recall` to check what the system knows. When Tyler states a preference or makes a decision during conversation, call `bin/remember` to store it."
+**Reason**: KA-4 of the knowledge-architecture plan requires each agent's identity.md to include proactive recall/remember instructions appropriate to their role. This gives Tarn the coordinator-appropriate guidance.
+**Status**: applied
+**Proposed**: 2026-04-09
+**Applied by**: Forge (Claude Code) 2026-04-09
+
+---
+
 ### crons.json: Enable sources_ingestion cron
 
 **File**: `agent-memory/tarn/crons.json`
@@ -307,3 +321,29 @@ Each entry must include:
 **Status**: applied  
 **Proposed**: 2026-04-09  
 **Applied by**: Forge (Claude Code) 2026-04-09 (retroactive — change was made during system-cleanup execution)
+
+---
+
+## [2026-04-10] crons.json — Fix sources_ingestion discord_channel_name
+
+**Requested by**: Tarn (bug fix confirmed by Tyler)
+**Target file**: `agent-memory/tarn/crons.json`
+**Change type**: edit
+**Current content**:
+
+```json
+"discord_channel_name": "sources",
+```
+
+(in the `sources_ingestion` cron entry)
+
+**Proposed content**:
+
+```json
+"discord_channel_name": "tarn",
+```
+
+**Reason**: The `sources_ingestion` cron currently posts its output logs to #sources, which is Tyler's URL drop channel. Cron output belongs in the system logging channel. All other system crons use "tarn" or "system-health" for log output; "tarn" is the correct system logging channel for script-type crons.
+**Status**: applied
+**Proposed**: 2026-04-10
+**Applied by**: Forge (Claude Code) 2026-04-10

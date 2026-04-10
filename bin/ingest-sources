@@ -99,23 +99,6 @@ def _fetch_messages(channel_id: str, token: str, limit: int = 50) -> list[dict]:
     return []
 
 
-def _get_reactions(channel_id: str, message_id: str, emoji: str, token: str) -> list[dict]:
-    """Get list of users who reacted with emoji on a message."""
-    encoded = urllib.parse.quote(emoji, safe="")
-    result = _discord_request("GET", f"/channels/{channel_id}/messages/{message_id}/reactions/{encoded}", token)
-    if isinstance(result, list):
-        return result
-    return []
-
-
-def _get_bot_user(token: str) -> str | None:
-    """Fetch the bot's own user ID."""
-    result = _discord_request("GET", "/users/@me", token)
-    if isinstance(result, dict):
-        return result.get("id")
-    return None
-
-
 def _add_reaction(channel_id: str, message_id: str, emoji: str, token: str) -> bool:
     """Add a reaction to a message. Returns True on success."""
     encoded = urllib.parse.quote(emoji, safe="")
@@ -332,6 +315,28 @@ def _append_source_entry(
     with path.open("a", encoding="utf-8") as f:
         f.write(entry_text)
 
+    # Also write a copy to wiki/raw/ for the consolidation compiler
+    # The <!-- wiki-target: sources.md --> header tells the compiler where to route it
+    import hashlib
+    raw_dir = WIKI_DIR / "raw"
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    url_hash = hashlib.md5(url.encode()).hexdigest()[:12]
+    raw_file = raw_dir / f"source-{url_hash}.md"
+    if not raw_file.exists():
+        now_ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        raw_entry = (
+            f"<!-- wiki-target: sources.md -->\n\n"
+            f"## [{now_ts}] fact\n\n"
+            f"Source ingested: {url} — {message_content[:200]}\n\n"
+            f"- **Type:** fact\n"
+            f"- **Source:** discord:#sources\n"
+            f"- **Confidence:** high\n"
+            f"- **Agent:** ingest-sources\n"
+            f"- **content_hash:** {url_hash}\n\n"
+            "---\n\n"
+        )
+        raw_file.write_text(raw_entry, encoding="utf-8")
+
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
@@ -358,13 +363,6 @@ def main() -> None:
     channel_id = os.environ.get("SOURCES_CHANNEL_ID") or SOURCES_CHANNEL_ID_DEFAULT
 
     print(f"[ingest-sources] channel_id={channel_id} dry_run={args.dry_run}")
-
-    # Get bot's own user ID so we can check if we already reacted
-    bot_user_id = _get_bot_user(token)
-    if not bot_user_id:
-        print("ERROR: could not fetch bot user ID — check token", file=sys.stderr)
-        sys.exit(1)
-    print(f"[ingest-sources] bot_user_id={bot_user_id}")
 
     messages = _fetch_messages(channel_id, token, limit=50)
     if not messages:
@@ -395,15 +393,6 @@ def main() -> None:
         if already_done:
             skipped += 1
             continue
-
-        # If reaction data not in message payload, check via API
-        # (reactions not always included in message list payload)
-        if not already_done and reactions == []:
-            reactors = _get_reactions(channel_id, msg_id, "✅", token)
-            if any(r.get("id") == bot_user_id for r in reactors):
-                already_done = True
-                skipped += 1
-                continue
 
         urls = _extract_urls(msg_content)
         if not urls:

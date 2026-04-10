@@ -199,9 +199,21 @@
     "prompt": "Run bin/ingest-sources to process new URLs from the #sources Discord channel. Report how many were processed.",
     "is_main_session": false,
     "notify_telegram": false,
-    "discord_channel_name": "sources",
+    "discord_channel_name": "tarn",
     "chat_id": "cron_sources_ingestion",
     "type": "script",
     "script_command": "/home/tchism/git/hollow/bin/ingest-sources"
+  },
+  {
+    "name": "knowledge_consolidation",
+    "schedule": "0 4 * * *",
+    "tz": "America/Chicago",
+    "prompt": "Run the nightly knowledge consolidation pipeline.\n\nStep 1: Run `bin/consolidate --verbose` and capture stdout.\nStep 2: Parse the output for: entities extracted, pages updated, contradictions resolved, entities pruned.\nStep 3: If any contradictions were found, post them to #knowledge: `send_discord_channel knowledge \"[contradiction summary]\"`\nStep 4: If the lint report has critical issues, post to #knowledge.\nStep 5: Return the consolidation summary as your final response.\n\nDo NOT call send_msg or send_discord (those go to #tarn).",
+    "model": "claude-sonnet-4-6",
+    "is_main_session": false,
+    "discord_channel_name": "knowledge",
+    "chat_id": "cron_knowledge_consolidation",
+    "enabled": true,
+    "gate_command": "test -d ~/git/hollow/agent-memory/wiki/raw && find ~/git/hollow/agent-memory/wiki/raw -name '*.md' -newer ~/git/hollow/memory/last-consolidation 2>/dev/null | head -1 | grep -q . && exit 0 || exit 1"
   }
 ]
