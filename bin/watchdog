@@ -416,6 +416,124 @@ def reset_stale_leases(cfg: dict) -> int:
     return reset_count
 
 
+def check_stale_inprogress(discord_token: Optional[str]) -> int:
+    """
+    Detect tasks stuck in in_progress with no recent activity.
+
+    A task is considered stale if:
+      - status == "in_progress"
+      - heartbeat_at is older than 3 days (or absent and updated_at is older than 3 days)
+
+    Detection only — no status changes. Posts a ⚠️ STALE IN-PROGRESS alert to
+    Discord #tasks for each stale task found.
+
+    Returns the count of stale tasks detected.
+    """
+    STALE_HOURS = 72  # 3 days
+
+    tasks = mc_api("GET", "/api/tasks", params={"status": "in_progress"})
+    if tasks is None:
+        log("  stale-inprogress: could not reach MC — skipping check")
+        return 0
+    if not isinstance(tasks, list):
+        log(f"  stale-inprogress: unexpected tasks response type: {type(tasks)}")
+        return 0
+
+    now = datetime.now(timezone.utc)
+    cutoff = now.replace(tzinfo=timezone.utc) if now.tzinfo else now
+    stale = []
+
+    for task in tasks:
+        task_id   = task.get("id", "?")
+        title     = task.get("title", "")
+        heartbeat = task.get("heartbeat_at")
+        updated   = task.get("updated_at")
+
+        # Determine the most recent activity timestamp
+        # Prefer heartbeat_at (more precise indicator of live execution)
+        # Fall back to updated_at if heartbeat not present
+        ref_str = heartbeat or updated
+        if not ref_str:
+            # No timestamps at all — treat as stale
+            stale.append({
+                "id": task_id,
+                "title": title,
+                "age_str": "unknown age",
+                "heartbeat_str": "never",
+            })
+            continue
+
+        try:
+            ref_dt = datetime.fromisoformat(ref_str.replace("Z", "+00:00"))
+        except ValueError:
+            log(f"  stale-inprogress: could not parse timestamp '{ref_str}' for task {task_id}")
+            continue
+
+        age_seconds = (now.replace(tzinfo=timezone.utc) - ref_dt).total_seconds()
+        if age_seconds < (STALE_HOURS * 3600):
+            # Still within the active window
+            continue
+
+        age_days  = int(age_seconds // 86400)
+        age_hours = int((age_seconds % 86400) // 3600)
+
+        # Format heartbeat display
+        if heartbeat:
+            hb_display = heartbeat
+        else:
+            hb_display = "no heartbeat (last updated: " + (updated or "unknown") + ")"
+
+        stale.append({
+            "id": task_id,
+            "title": title,
+            "age_str": f"{age_days}d {age_hours}h",
+            "heartbeat_str": hb_display,
+        })
+
+    if not stale:
+        log("  stale-inprogress: no stale in-progress tasks found")
+        return 0
+
+    log(f"  stale-inprogress: {len(stale)} stale task(s) found")
+
+    for s in stale:
+        alert = (
+            f"\u26a0\ufe0f STALE IN-PROGRESS: {s['title']}\n"
+            f"  task id: {s['id']}\n"
+            f"  age: {s['age_str']}, last heartbeat: {s['heartbeat_str']}\n"
+            f"  (detection only — no automatic action taken)"
+        )
+        log(f"  stale-inprogress: {s['id']} — {s['title'][:60]} — {s['age_str']}")
+
+        # Post to Discord #tasks
+        if discord_token:
+            send_discord(discord_token, "tasks", alert)
+        else:
+            log(f"  stale-inprogress: no Discord token — would have sent: {alert}")
+
+        # Log to MC activity
+        mc_api(
+            "POST",
+            "/api/agent-activity",
+            data={
+                "agent": "watchdog",
+                "action": (
+                    f"stale-inprogress alert: {s['title']!r} (task {s['id']}) has been "
+                    f"in_progress for {s['age_str']} with no heartbeat activity"
+                ),
+                "action_type": "watchdog.stale_inprogress_alert",
+                "payload": {
+                    "task_id": s["id"],
+                    "task_title": s["title"],
+                    "age": s["age_str"],
+                    "last_heartbeat": s["heartbeat_str"],
+                },
+            },
+        )
+
+    return len(stale)
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def acquire_lock() -> bool:
@@ -495,6 +613,12 @@ def _main(args) -> None:
     # This runs unconditionally on every watchdog sweep, before the agent health checks.
     log("Checking for stale MC leases...")
     reset_stale_leases(cfg)
+
+    # ── Stale in-progress detector ─────────────────────────────────────────────
+    # Alert on tasks stuck in in_progress with no heartbeat activity for 3+ days.
+    # Detection only — does not modify any task status.
+    log("Checking for stale in-progress tasks...")
+    check_stale_inprogress(discord_token)
 
     # Build agent list from config
     agents = [{"name": cfg["coordinator"]["name"], "port": cfg["coordinator"]["port"]}]
