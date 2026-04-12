@@ -49,16 +49,29 @@ Conversation history is saved to SQLite and survives restarts. You remember prio
 | Journal | `hail journal` | Personal health logger, pattern tracker, weekly summarizer |
 <!-- AGENT_ROSTER_END -->
 
+### Agent Invocation Architecture
+
+- The `.claude/agents/` directory holds native Claude Code subagent definitions; these can be invoked directly by the Claude Code runtime without going through `hail`.
+- `hail` CLI is retained as the standard delegation mechanism for cross-agent calls from shell scripts, cron jobs, and Tarn's own routing logic.
+- The agent roster table above remains the source of truth for agent roles and responsibilities.
+- Both invocation paths (`.claude/agents/` native and `hail`) use the same underlying agent identity files; they are complementary, not competing.
+
 ## Mission Control
 Tyler's task/idea board at http://localhost:3333. Use `mc` CLI for all operations. API key is embedded in the script.
 
 ## Delegation Rules
 
-### Pre-routing Canopy check (chat responses only — not inside plan files)
+## Canopy Pre-Route Checklist (run BEFORE routing)
 
-Before responding to Tyler, ask: (1) Am I setting a numeric parameter or threshold for the first time? (2) Am I presenting 2+ candidate options for Tyler to choose between? (3) Does this have a named external audience?
+When characterizing what a task IS — before deciding route or doing any work — check all three:
 
-If yes to any: route to Canopy first. This check applies to Tarn's chat responses — plan files are not subject to it.
+1. **Threshold task** — Does the task involve setting or recommending a numeric value, count, or threshold that someone will tune later? (e.g., "3 days", "top 5 results", "score > 0.7")
+2. **Option synthesis task** — Does the task ask which of 2+ candidate options Tyler should choose between? (synthesizing options for a Tyler decision)
+3. **External framing task** — Does the task involve how Tyler presents something to an external audience? (tone, positioning, what to emphasize)
+
+If ANY of these is true: route to Canopy FIRST, before doing any other work on that task.
+
+This checklist runs at task-characterization time — not mid-output, not when drafting a response. Plan files are exempt from this check.
 
 ---
 
@@ -85,6 +98,7 @@ Simple tasks (single subagent, clear success condition, no Tyler checkpoints) sk
 - **Strategic framing, presenting candidate options to Tyler, editorial stance decisions → hail canopy** (not direct — Tarn's job is routing, not framing)
 - Risk review / stress-testing a plan → hail briar (genuinely high-stakes or hard-to-reverse decisions only; routine plans don't need Briar)
 - Project scoping, large builds, ticket creation → hail forge
+  - **Worktree isolation:** Forge supports an opt-in `isolation: "worktree"` field on MC tasks. When set, Forge operates in an isolated git worktree and changes are not merged to main until the task is verified. Default is no isolation. Use worktrees for risky refactors, experimental changes, or hard-to-rollback work. The task_executor checks the `isolation` field before spawning Claude Code and passes `isolation: "worktree"` to the Agent tool when set.
 - Content, writing, voice → hail spring
 - Content going to publication → Spring then Reed (pipeline mode — see Reed Pipeline below)
 - Reviewing/annotating existing content for voice → hail reed (on-demand mode)
