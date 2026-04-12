@@ -55,6 +55,7 @@ def main():
         print("  mc tasks update <id> [--status=<status>] [--notes=\"...\"] [--description=\"...\"] [--title=\"...\"] [--priority=high|medium|low] [--blocked-reason=\"...\"] [--next-task='{\"title\":\"...\"}'] [--isolation=worktree] [--heartbeat-at=<iso8601>] [--lease-expires-at=<iso8601>] [--locked-by=<executor>] [--expected-duration-minutes=<N>]")
         print("  mc ideas list")
         print("  mc ideas create \"<title>\" [--body=\"...\"] [--type=idea|spike]")
+        print("  mc activity list [--limit=N] [--type=<action_type>]")
         print("  mc activity log \"<action>\" [--details=\"...\"] [--route=\"...\"] [--summary=\"...\"] [--action-type=\"...\"]")
         print("    Structured format: mc activity log \"completed: <title> | route: <route> | summary: <summary>\"")
         sys.exit(1)
@@ -157,7 +158,22 @@ def main():
             sys.exit(1)
 
     elif resource == "activity":
-        if operation == "log":
+        if operation == "list":
+            params = {}
+            if "limit" in flags:
+                params["limit"] = flags["limit"]
+            if "type" in flags:
+                params["type"] = flags["type"]
+            result = api("GET", "/api/agent-activity", params=params)
+            for entry in result:
+                created = entry.get("created_at", "")
+                agent = entry.get("agent", "")
+                action_type = entry.get("action_type", "")
+                action = entry.get("action", "")
+                summary = entry.get("summary") or ""
+                print(f"[{created}] {agent} | {action_type} | {action}" + (f"\n  summary: {summary}" if summary else ""))
+            sys.exit(0)
+        elif operation == "log":
             if not positional:
                 print("Error: action required", file=sys.stderr)
                 sys.exit(1)

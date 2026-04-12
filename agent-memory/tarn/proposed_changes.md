@@ -310,6 +310,20 @@ Each entry must include:
 
 ---
 
+## [2026-04-11] crons.json — task_executor: set assigned_to at routing time
+
+**Requested by**: Forge (MC Task NkgqQkJXzzgg2Cf6K37Y-)
+**Target file**: `agent-memory/tarn/crons.json`
+**Change type**: edit
+**Current content**: Step 1c (REAL-TIME ROUTE LOG) logs a routing.decision activity entry but does not set `assigned_to` on the task. Step 2 then proceeds to routing.
+**Proposed content**: Added step 1d (ASSIGN OWNER) immediately after 1c: PATCH the task with `assigned_to` set to the agent being used, using the curl API. Mapping: hail forge/claude-code/direct spawn → "forge"; hail tap → "tap"; hail canopy → "canopy"; hail briar → "briar"; hail spring → "spring"; hail reed → "reed"; hail flux → "flux"; direct handling by Tarn → "tarn".
+**Reason**: 214 of 226 tasks (95%) were unassigned. Routing audits could not trace which agent did work, and stale in-progress tasks had no owner. This change fixes task ownership at the moment of routing.
+**Status**: applied
+**Proposed**: 2026-04-11
+**Applied by**: Forge (Claude Code) 2026-04-11
+
+---
+
 ### crons.json: Enable sources_ingestion cron
 
 **File**: `agent-memory/tarn/crons.json`
