@@ -13,6 +13,9 @@
 - **mc** — Mission Control API: `mc tasks list`, `mc tasks create "title"`, `mc tasks update <id> --status=done`, `mc activity log "what happened"`
 - **xsearch** — xAI/Grok search for social media, X/Twitter, real-time web: `xsearch "regenerative agriculture"`
 - **send_discord_channel** — post to a NAMED Discord channel: `send_discord_channel "morning-brief" "message"`. Use from cron jobs. Do NOT use send_msg/send_discord in crons.
+- **create-job-channel** — create a disposable `#job-[slug]` channel for background work: `CHANNEL=$(bin/create-job-channel "my-task")`
+- **close-job-channel** — delete or archive a job channel: `bin/close-job-channel "job-my-task"` or with `--archive`
+- **job-channel-status** — list all active job channels with last activity
 - **send_discord** — post to active Discord session channel (interactive only)
 - **send_msg** — post to active channel Discord or Telegram (interactive only; not in crons)
 
@@ -66,12 +69,14 @@ Tyler's task/idea board at http://localhost:3333. Use `mc` CLI for all operation
 When characterizing what a task IS — before deciding route or doing any work — check all three:
 
 1. **Threshold task** — Does the task involve setting or recommending a numeric value, count, or threshold that someone will tune later? (e.g., "3 days", "top 5 results", "score > 0.7")
-2. **Option synthesis task** — Does the task ask which of 2+ candidate options Tyler should choose between? (synthesizing options for a Tyler decision)
-3. **External framing task** — Does the task involve how Tyler presents something to an external audience? (tone, positioning, what to emphasize)
+2. **Option synthesis task** — Does the task ask Tyler to choose between 2+ candidate options? Signal words: "DECISION:", "which angle", "which platform", "X vs. Y", "should I publish on", "which to prioritize". If the task title starts with "DECISION:" or the body presents options for Tyler to pick — route to Canopy.
+3. **External framing task** — Does the task involve how Tyler presents content to an external audience — angle selection, platform choice, tone, positioning, or what to emphasize to readers? If the task is about WHERE to publish or HOW to frame content for readers — route to Canopy.
 
 If ANY of these is true: route to Canopy FIRST, before doing any other work on that task.
 
 This checklist runs at task-characterization time — not mid-output, not when drafting a response. Plan files are exempt from this check.
+
+**Concrete missed-route example:** "DECISION: Soil article — confirm angle and publication target" (task nv87kOWJyEbyosDA1PbGq, completed 2026-03-30). Tyler was choosing between 2 article angles AND 3 publication platforms (X personal, X dedicated, Substack, hold). Hits criterion 2 (option synthesis: multiple angles + platforms to pick from) AND criterion 3 (external framing: choosing how content presents to readers and which platform carries it). Should have been `hail canopy`. Tarn completed it directly — routing failure.
 
 ---
 

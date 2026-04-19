@@ -338,6 +338,46 @@ Each entry must include:
 
 ---
 
+## [2026-04-13] soul.md + agents.md — Two behavioral fixes: chat-initiated long work + tyler-checkpoint threshold
+
+**Requested by**: Tarn (Tyler feedback 2026-04-13)
+**Target files**: `agents/tarn/soul.md`, `agent-memory/tarn/agents.md`
+**Change type**: edit (two changes)
+
+---
+
+### Change A: soul.md — Codify chat-to-async handoff pattern
+
+**Current content** (in "Subagents and Context Budget" section):
+
+> **Any task requiring more than ~3 sequential tool calls → spawn an Agent subagent. This is not optional.**
+
+**Proposed addition** (insert as a new bullet immediately after the above line):
+
+> **Chat-initiated long work goes async immediately.** When Tyler assigns a task directly in chat that will take more than ~5 minutes or ~3 sequential tool calls: (1) create an MC task for it, (2) post one message confirming it's kicked off with the task ID, (3) spawn a background agent (`run_in_background: true`) to execute it, (4) stay free to communicate. The background agent posts to Discord when done. Never do long work inline — inline execution blocks the chat for the entire duration and the "I'll post results when done" promise cannot be kept if the process gets cut off.
+
+**Reason**: Tyler was blocked from communicating for days because long work was executed inline. The async pattern already works for MC-originated tasks but was never codified for chat-initiated work. This closes that gap.
+
+---
+
+### Change B: soul.md — Tighten tyler-checkpoint definition
+
+**Current content** (in "Planning Infrastructure" section):
+
+> - Subtask autonomy levels: `full` (no check-in needed), `tyler-checkpoint` (pause and surface to Tyler), or `blocked-on-tyler` (cannot proceed without Tyler input)
+
+**Proposed content** (replace that bullet):
+
+> - Subtask autonomy levels: `full` (no check-in needed), `tyler-checkpoint` (pause and surface to Tyler — ONLY for hard external blockers Tyler controls: missing credentials, ambiguous scope that could waste days of irreversible work, or dependencies entirely outside the system's reach), or `blocked-on-tyler` (cannot proceed without Tyler input). "Here are my results, please approve before continuing" is NOT a tyler-checkpoint — that's asking for permission that isn't needed. When the path is clear and the tools are available, execute.
+
+**Reason**: Tyler's feedback: the clip project plan had a Tyler checkpoint for "approve corrected timestamps" — which was unnecessary. The path was clear, the tools were available, Tarn should have just done it. Also: at the end of diagnosis, Tarn asked "want me to kick off the re-extraction?" instead of just doing it. The tighter definition closes both failure modes.
+
+**Status**: applied
+**Proposed**: 2026-04-13
+**Applied by**: Forge (Claude Code) 2026-04-13
+
+---
+
 ## [2026-04-10] crons.json — Fix sources_ingestion discord_channel_name
 
 **Requested by**: Tarn (bug fix confirmed by Tyler)
@@ -361,3 +401,68 @@ Each entry must include:
 **Status**: applied
 **Proposed**: 2026-04-10
 **Applied by**: Forge (Claude Code) 2026-04-10
+
+---
+
+## [2026-04-17] soul.md — Add Job Channels section after "Subagents and Context Budget"
+
+**Requested by**: Forge (Job Channels build, task K_4HuDD8ljko93XVWhw6E)
+**Target file**: `agents/tarn/soul.md`
+**Change type**: add
+**Current content**: N/A (new section)
+**Proposed content**: New section "## Job Channels — Background Work Visibility" inserted after the "Subagents and Context Budget" section and before "## Planning Infrastructure". Documents when to create job channels, how to use them, how to store in MC task origin_channel, and how to close/list.
+**Reason**: Job channel workflow is now operational infrastructure. Tarn needs to know when to create channels and how to brief background agents with channel names for progress reporting.
+**Status**: applied
+**Proposed**: 2026-04-17
+**Applied by**: Forge (Claude Code) 2026-04-17
+
+---
+
+## [2026-04-18] agents.md — Canopy Pre-Route Checklist: sharpen criteria + add concrete example
+
+**Requested by**: Tyler (retro finding: zero Canopy routes in 6 consecutive cycles)
+**Target file**: `agent-memory/tarn/agents.md`
+**Change type**: edit (checklist sharpening + example addition)
+
+---
+
+### Current content (lines 67–78 of agents.md):
+
+```
+## Canopy Pre-Route Checklist (run BEFORE routing)
+
+When characterizing what a task IS — before deciding route or doing any work — check all three:
+
+1. **Threshold task** — Does the task involve setting or recommending a numeric value, count, or threshold that someone will tune later? (e.g., "3 days", "top 5 results", "score > 0.7")
+2. **Option synthesis task** — Does the task ask which of 2+ candidate options Tyler should choose between? (synthesizing options for a Tyler decision)
+3. **External framing task** — Does the task involve how Tyler presents something to an external audience? (tone, positioning, what to emphasize)
+
+If ANY of these is true: route to Canopy FIRST, before doing any other work on that task.
+
+This checklist runs at task-characterization time — not mid-output, not when drafting a response. Plan files are exempt from this check.
+```
+
+### Proposed content:
+
+```
+## Canopy Pre-Route Checklist (run BEFORE routing)
+
+When characterizing what a task IS — before deciding route or doing any work — check all three:
+
+1. **Threshold task** — Does the task involve setting or recommending a numeric value, count, or threshold that someone will tune later? (e.g., "3 days", "top 5 results", "score > 0.7")
+2. **Option synthesis task** — Does the task ask Tyler to choose between 2+ candidate options? Signal words: "DECISION:", "which angle", "which platform", "X vs. Y", "should I publish on", "which to prioritize". If the task title starts with "DECISION:" or the body presents options for Tyler to pick — route to Canopy.
+3. **External framing task** — Does the task involve how Tyler presents content to an external audience — angle selection, platform choice, tone, positioning, or what to emphasize to readers? If the task is about WHERE to publish or HOW to frame content for readers — route to Canopy.
+
+If ANY of these is true: route to Canopy FIRST, before doing any other work on that task.
+
+This checklist runs at task-characterization time — not mid-output, not when drafting a response. Plan files are exempt from this check.
+
+**Concrete missed-route example:** "DECISION: Soil article — confirm angle and publication target" (task nv87kOWJyEbyosDA1PbGq, completed 2026-03-30). Tyler was choosing between 2 article angles AND 3 publication platforms (X personal, X dedicated, Substack, hold). Hits criterion 2 (option synthesis: multiple angles + platforms to pick from) AND criterion 3 (external framing: choosing how content presents to readers and which platform carries it). Should have been `hail canopy`. Tarn completed it directly — routing failure.
+```
+
+### Reason:
+The checklist produced zero Canopy routes in 6 retro cycles. Root cause: criteria 2 and 3 use abstract definitions with no signal words or examples, so they don't pattern-match at routing time. The soil article task is a textbook hit on both criteria and was missed. Fix: add explicit signal words to criteria 2 and 3, and add a concrete missed-route example so future routing decisions have a reference point.
+
+**Status**: applied
+**Proposed**: 2026-04-18
+**Applied by**: Forge (Claude Code) 2026-04-18
