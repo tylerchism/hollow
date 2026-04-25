@@ -480,3 +480,17 @@ The checklist produced zero Canopy routes in 6 retro cycles. Root cause: criteri
 **Status**: applied
 **Proposed**: 2026-04-25
 **Applied by**: Forge (Claude Code) 2026-04-25
+
+---
+
+## [2026-04-25] agents.md — Document Flux managed bot roster (architecture gap)
+
+**Requested by**: Forge (MC Task r9HRL1EsbjBg-GYaBN6I4, routed via structural gate)
+**Target file**: `agent-memory/tarn/agents.md`
+**Change type**: add
+**Current content**: N/A — Flux's roster entry in agents.md lists only its role ("Trading strategist, bot architect, performance monitor") with no enumeration of which bots it manages.
+**Proposed content**: New section `## Flux — Managed Bot Roster` inserted after the Corpus Ingestion Pipeline section and before `## Agent Tool — When to Use It`. Documents all 5 bots (trader, trader2, trader3, trader4, trader-weather): purpose, market/data sources, mode (paper vs. live), and key external dependencies. Notes that all bots are currently paper/shadow mode with no live money moved.
+**Reason**: bots/trader, bots/trader2, bots/trader3, bots/trader4, and bots/trader-weather exist on the filesystem and are actively developed under Flux's direction, but none are enumerated in agents.md. An architecture-review gap task was raised by the agent_upgrades cron because the reality-scan found 5 bots with no documentation entry. Flux cannot be reviewed, tasked, or monitored without knowing which bots are under its ownership.
+**Status**: applied
+**Proposed**: 2026-04-25
+**Applied by**: Forge (Claude Code) 2026-04-25

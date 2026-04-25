@@ -194,6 +194,32 @@ System-level infrastructure. No single agent owns ingestion — Tarn monitors he
 
 ---
 
+## Flux — Managed Bot Roster
+
+All bots are in `~/git/hollow/bots/`. All are currently **paper/shadow mode only** — no live money is moved. Flux owns design, architecture, and performance review for all five.
+
+| Bot | Purpose | Markets / Data Sources | External Dependencies |
+|-----|---------|----------------------|----------------------|
+| **trader** | Original Hollow Trader — V0 data ingestion loop + V1 paper trading engine. Reference/base implementation. | General (legacy) | None beyond standard libs |
+| **trader2** | Cross-market prediction market arb — detects price divergences between Kalshi and CME Fed Funds Futures on FOMC rate decision markets. Phase 2: Polymarket. | Kalshi (WebSocket + REST), CME via FRED API, Polymarket REST (Phase 2 reads only) | Kalshi demo API key, FRED API key, Discord webhook |
+| **trader3** | Kalshi crypto price arb vs. Deribit options. | Kalshi, Deribit | Kalshi API, Deribit API |
+| **trader4** | Kalshi market maker — posts simulated limit orders on thin Kalshi macro markets to collect the spread via simulated fills. | Kalshi macro markets | Kalshi demo API key |
+| **trader-weather** | Kalshi daily temperature market arb using dual GFS + ECMWF forecast consensus to find edges against Kalshi temperature market pricing. | Kalshi temperature markets, GFS forecast data, ECMWF forecast data | Weather forecast APIs |
+
+### Common Infrastructure
+
+- Kill switch: each bot checks for a `KILL` file (configurable path) and halts immediately if present. `bots/trader/kill` and `bots/trader2/kill` are scripts to activate.
+- SQLite state DB per bot: stores trades, signals, P&L.
+- Discord notifications: posts to `#trader-bot` channel.
+- All `requirements.txt` files use exact version pins with sha256 hashes.
+
+### Routing
+
+- Trading strategy decisions, bot architecture questions, performance review → `hail flux`
+- Do NOT route trading questions to Canopy or Tap — Flux has the domain context.
+
+---
+
 ## Agent Tool — When to Use It
 
 - Use when task needs 3+ sequential tool calls, combines specialist calls with file edits, or would leave work incomplete if cut off.
