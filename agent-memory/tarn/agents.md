@@ -152,6 +152,48 @@ Restart takes ~10–15s. Startup notification signals new process is live.
 
 ---
 
+## Corpus Ingestion Pipeline
+
+An external integration layer that populates the knowledge corpus used by `bin/recall` and `bin/retrieve`. Managed via cron; not invoked interactively by Tarn in normal operation.
+
+### Scripts
+
+- **bin/ingest** — Generic: ingest a directory of text files into a per-person SQLite corpus DB at `~/data/corpus/<person_slug>/memory.db`.
+- **bin/ingest-corpus** — Per-person CLI: accepts RSS feeds, transcript files, blog posts, or YouTube metadata for a named person slug.
+- **bin/ingest-vitalis** — Daniel Vitalis full pipeline: fetches Rewild Yourself RSS → downloads audio via yt-dlp → transcribes via WhisperX → calls bin/ingest.
+- **bin/ingest-masterjohn** — Chris Masterjohn: reads `wiki/raw/*chrismasterjohnphd*.md` files (written by bin/substack-fetcher) → calls bin/ingest.
+- **bin/ingest-sources** — Reads the #sources Discord channel, fetches URL content, writes to `wiki/raw/`, and routes DV/CM/BW content to their per-person corpus DBs via bin/ingest-corpus.
+- **bin/substack-fetcher** — Fetches full-content posts from paid Substack subscriptions (SUBSTACK_SID from .env) → writes to `wiki/raw/YYYY-MM-DD-{slug}.md`. State file: `agent-memory/tarn/substack-state.json`.
+- **bin/check-corpus-health** — Monitors all `~/data/corpus/` DBs for staleness, missing chunks, and ingest errors. Alerts to Discord on degraded status.
+- **bin/test-vitalis-retrieval** — Smoke-test for Vitalis corpus retrieval; not run in production crons.
+
+### Storage
+
+- **Per-person SQLite DBs:** `~/data/corpus/<person_slug>/memory.db` (e.g., `daniel-vitalis`, `chris-masterjohn`)
+- **Raw markdown:** `~/git/hollow/wiki/raw/` — intermediate store for Substack and #sources content before ingestion
+
+### External Dependencies
+
+- **Substack API** — SUBSTACK_SID cookie (`agents/tarn/.env`); required by bin/substack-fetcher
+- **Discord bot token** — DISCORD_BOT_TOKEN (`agents/tarn/.env`); required by bin/ingest-sources to read #sources channel
+- **yt-dlp** — local binary; required by bin/ingest-vitalis for audio download
+- **WhisperX** — local model; required by bin/ingest-vitalis for transcription
+- **Libsyn RSS** — public feed at `feeds.libsyn.com/rewild-yourself/rss`; fetched by bin/ingest-vitalis
+
+### Cron Schedule
+
+| Cron | Schedule | What it runs |
+|---|---|---|
+| `corpus_health_check` | Mondays 10:10 AM CT | `bin/check-corpus-health --all` |
+| `sources_ingestion` | Every 2 hours | `bin/ingest-sources` |
+| `substack_fetcher` | Daily 6 AM CT | `bin/substack-fetcher` |
+
+### Ownership
+
+System-level infrastructure. No single agent owns ingestion — Tarn monitors health via `corpus_health_check` cron. Retrieved content is consumed by all agents via `bin/recall` / `bin/retrieve`.
+
+---
+
 ## Agent Tool — When to Use It
 
 - Use when task needs 3+ sequential tool calls, combines specialist calls with file edits, or would leave work incomplete if cut off.

@@ -466,3 +466,17 @@ The checklist produced zero Canopy routes in 6 retro cycles. Root cause: criteri
 **Status**: applied
 **Proposed**: 2026-04-18
 **Applied by**: Forge (Claude Code) 2026-04-18
+
+---
+
+## [2026-04-25] agents.md — Document corpus ingestion pipeline (architecture gap)
+
+**Requested by**: Forge (MC Task 6u7TjqaXyI4iFikf-aB1_, routed via structural gate)
+**Target file**: `agent-memory/tarn/agents.md`
+**Change type**: add
+**Current content**: N/A — no corpus pipeline section exists
+**Proposed content**: New section `## Corpus Ingestion Pipeline` inserted after `## Self-Restart` and before `## Agent Tool — When to Use It`. Documents all 7 bin scripts, storage paths, external dependencies, cron schedule, and ownership.
+**Reason**: bin/ingest, bin/ingest-corpus, bin/ingest-vitalis, bin/ingest-masterjohn, bin/substack-fetcher, bin/check-corpus-health, and bin/test-vitalis-retrieval exist and run in production but have no architecture documentation. This is an external integration layer with persistent storage (~/data/corpus/) and API dependencies (Substack, Discord, yt-dlp, WhisperX) that must be reflected in agents.md.
+**Status**: applied
+**Proposed**: 2026-04-25
+**Applied by**: Forge (Claude Code) 2026-04-25
