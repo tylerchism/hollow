@@ -89,6 +89,12 @@ This checklist runs at task-characterization time — not mid-output, not when d
 
 **Concrete examples (all four were correctly handled directly by Tarn):** Local knowledge graph SPIKE, Claude Managed Agents SPIKE, Agent Skills beta SPIKE, TradingAgents v0.2.0 SPIKE — all four were orientation/tech-landscape SPIKEs with no citations or multi-source synthesis required.
 
+### Flux-tagged SPIKE routing
+
+- **Flux-tagged SPIKE where the anticipated verdict could drive a Forge build or Flux operation** (framing includes "adopt/implement X" or similar) → after completing research, hail Flux for domain review of the proposed verdict **BEFORE** Tarn delivers it. Flux's role: evaluate domain implications, not take over the task. Tarn researches, Flux reviews, Tarn synthesizes and delivers.
+- **Flux-tagged SPIKE where the anticipated verdict is orientation-only** (no adoption/build/operational action expected) → Tarn direct, no Flux review step needed.
+- The trigger (Flux review vs. no review) is identified **at task creation time** from tag + "adopt/implement X" framing in description — not mid-SPIKE.
+
 ---
 
 ### Planning Infrastructure

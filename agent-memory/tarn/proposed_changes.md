@@ -508,3 +508,18 @@ The checklist produced zero Canopy routes in 6 retro cycles. Root cause: criteri
 **Status**: applied
 **Proposed**: 2026-04-25
 **Applied by**: Forge (Claude Code) 2026-04-25
+
+---
+
+## [2026-04-26] agents.md — Add Flux domain-review step to SPIKE Routing Rules
+
+**Requested by**: Forge (MC Task TITAKgGB0XGwpbN-GrcdF, routed via structural gate)
+**Target file**: `agent-memory/tarn/agents.md`
+**Change type**: add (sub-rule within existing `## SPIKE Routing Rules` section)
+**Canopy verdict source**: task dm95c7VHcx3LGKjier-k4, 2026-04-26
+**Current content**: SPIKE Routing Rules section has exploratory vs. depth tiers only. No flux-tagged sub-rule exists.
+**Proposed content**: New `### Flux-tagged SPIKE routing` sub-section appended within `## SPIKE Routing Rules`, before the closing `---`. Two cases: (1) flux-tagged SPIKE where anticipated verdict could drive a Forge build or Flux operation ('adopt/implement X' framing) → after research, hail Flux for domain review of proposed verdict BEFORE Tarn delivers it; (2) flux-tagged SPIKE where verdict is orientation-only → Tarn direct, no Flux review. Trigger determined at task creation time from tag + framing, not mid-SPIKE.
+**Reason**: Canopy completed a routing-policy audit (task dm95c7VHcx3LGKjier-k4) and determined that flux-tagged SPIKEs with adoption/implementation framing need a Flux domain-review gate before Tarn synthesizes and delivers. This prevents Tarn from delivering verdicts on trading/infra domains that could drive Forge builds or Flux operations without Flux having evaluated the domain implications.
+**Status**: applied
+**Proposed**: 2026-04-26
+**Applied by**: Forge (Claude Code) 2026-04-26
