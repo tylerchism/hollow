@@ -80,6 +80,17 @@ This checklist runs at task-characterization time — not mid-output, not when d
 
 ---
 
+## SPIKE Routing Rules
+
+- **Exploratory SPIKE** (orientation, "what is X", tech landscape, self-contained research Tarn can resolve in a single pass) → Tarn handles directly. Log route as `direct`.
+- **Depth SPIKE** (empirical claims needing citations, multi-source synthesis, or research requiring multiple lookup passes to verify) → `hail tap`.
+
+`direct-research` is **not** a valid route name. Exploratory SPIKEs handled directly use route `direct` in the activity log.
+
+**Concrete examples (all four were correctly handled directly by Tarn):** Local knowledge graph SPIKE, Claude Managed Agents SPIKE, Agent Skills beta SPIKE, TradingAgents v0.2.0 SPIKE — all four were orientation/tech-landscape SPIKEs with no citations or multi-source synthesis required.
+
+---
+
 ### Planning Infrastructure
 
 Non-trivial tasks get a plan file before execution. Flow:

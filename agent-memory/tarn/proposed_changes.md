@@ -494,3 +494,17 @@ The checklist produced zero Canopy routes in 6 retro cycles. Root cause: criteri
 **Status**: applied
 **Proposed**: 2026-04-25
 **Applied by**: Forge (Claude Code) 2026-04-25
+
+---
+
+## [2026-04-25] agents.md — Add SPIKE routing rules (audit: 4 SPIKEs routed to undefined 'direct-research')
+
+**Requested by**: Forge (MC Task qZCvKpflhggPAJdEOgQ8W, routed via structural gate)
+**Target file**: `agent-memory/tarn/agents.md`
+**Change type**: add
+**Current content**: N/A — no SPIKE routing policy exists in Delegation Rules
+**Proposed content**: New section `## SPIKE Routing Rules` inserted after the Canopy Pre-Route Checklist block and before the `### Planning Infrastructure` section. Defines two tiers: (1) exploratory/orientation SPIKEs → Tarn handles directly, route logged as `direct`; (2) depth SPIKEs requiring empirical claims, citations, or multi-source synthesis → `hail tap`. Explicitly calls out that `direct-research` is not a valid route name.
+**Reason**: Audit of 4 SPIKEs (Local knowledge graph SPIKE, Claude Managed Agents SPIKE, Agent Skills beta SPIKE, TradingAgents v0.2.0 SPIKE) found they were logged with route `direct-research`, which is not a defined route in agents.md. All four were correctly self-handled (exploratory/orientation), but the undefined route name pollutes the activity log and the policy was never codified. This entry formalizes it.
+**Status**: applied
+**Proposed**: 2026-04-25
+**Applied by**: Forge (Claude Code) 2026-04-25
