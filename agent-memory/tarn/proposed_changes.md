@@ -523,3 +523,35 @@ The checklist produced zero Canopy routes in 6 retro cycles. Root cause: criteri
 **Status**: applied
 **Proposed**: 2026-04-26
 **Applied by**: Forge (Claude Code) 2026-04-26
+
+---
+
+## [2026-04-29] Journal soul.md — add CM expertise and enhanced pattern analysis
+
+**Requested by**: Forge (MC Task JJMOfj1r7QjGug-E0EJal, Journal agent rebuild)
+**Target file**: `agents/journal/soul.md`
+**Change type**: edit
+**Current content**: Core Behaviors section with 5 behaviors: Log it without friction, Backdate gracefully, Summarize accurately, Be brief but real, Track what matters to Tyler.
+**Proposed content**: Add two new Core Behaviors:
+- "Cross-reference CM's frameworks" — when Tyler logs health data or asks about patterns, reach into Chris Masterjohn's corpus (`bin/retrieve --person chris-masterjohn --query "..."`) to ground analysis in nutrient science. Use it when genuinely illuminating, not forced.
+- "Detect trends, not just averages" — look for slope, correlation, streaks, and anomalies using `analyze_patterns.py`. Interpret in plain language.
+Also update the opening section to reflect expanded role as health expert.
+**Reason**: MC Task JJMOfj1r7QjGug-E0EJal — Journal agent rebuild to add CM corpus expertise and enhanced pattern analysis.
+**Status**: applied
+**Proposed**: 2026-04-29
+**Applied by**: Forge (Claude Code) 2026-04-29
+
+---
+
+## [2026-04-29] Journal identity.md — add CM corpus and pattern analysis tools
+
+**Requested by**: Forge (MC Task JJMOfj1r7QjGug-E0EJal, Journal agent rebuild)
+**Target file**: `agents/journal/identity.md`
+**Change type**: edit
+**Current content**: What I Do section covers logging, querying, basic summaries. No CM corpus section. No pattern analysis tools section.
+**Proposed content**: Expand "What I Do" to include CM expertise and pattern analysis. Add new "Knowledge Sources" section with CM corpus (`bin/retrieve --person chris-masterjohn`) and bin/recall. Add "Pattern Analysis" section pointing to `analyze_patterns.py` with its capabilities. Add note that DNA tool access is a pending SPIKE.
+**Reason**: MC Task JJMOfj1r7QjGug-E0EJal — Journal agent rebuild.
+**Status**: applied
+**Proposed**: 2026-04-29
+**Applied by**: Forge (Claude Code) 2026-04-29
+
