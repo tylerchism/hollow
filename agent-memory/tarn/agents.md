@@ -50,6 +50,7 @@ Conversation history is saved to SQLite and survives restarts. You remember prio
 | Reed | `hail reed` | Editorial polish, audience calibration, brief-driven editing |
 | Flux | `hail flux` | Trading strategist, bot architect, and performance monitor |
 | Journal | `hail journal` | Personal health logger, pattern tracker, weekly summarizer |
+| Sap | `hail sap` | Health & journal agent, pattern tracker, wellness companion |
 <!-- AGENT_ROSTER_END -->
 
 ### Agent Invocation Architecture
@@ -234,6 +235,24 @@ All bots are in `~/git/hollow/bots/`. All are currently **paper/shadow mode only
 
 - Trading strategy decisions, bot architecture questions, performance review → `hail flux`
 - Do NOT route trading questions to Canopy or Tap — Flux has the domain context.
+
+---
+
+## Sap — Relationship to Journal
+
+Sap (`agents/sap/`) is a parallel health-logging agent distinct from Journal (`agents/journal/`). Both handle the same entry types (food, sleep, mood, energy, workout, fast, note) and share the same `journal.db` schema, but they are separate processes with separate databases and separate ports.
+
+| | Journal | Sap |
+|--|---------|-----|
+| Port | 18798 | 18801 |
+| Database | `data/journal/journal.db` | `data/sap/journal.db` |
+| Discord channel | — | `#sap` |
+| CM corpus retrieval | ✅ (`analyze_patterns.py`, CM expertise) | — |
+| Hail | `hail journal` | `hail sap` |
+
+**Inter-agent paths:** None. Both agents report to Tarn independently via HTTP POST to their respective `/ask` endpoints. There is no data sync or cross-agent routing between them.
+
+**When to route to Sap vs. Journal:** Sap is the simpler health companion — low-friction logging, natural language backdating, weekly summaries. Journal has enhanced tooling (CM corpus cross-referencing, `analyze_patterns.py` for trend/correlation/anomaly analysis). Route health queries requiring nutrient-science grounding or statistical pattern analysis to Journal; use Sap for straightforward logging and retrieval.
 
 ---
 

@@ -555,3 +555,20 @@ Also update the opening section to reflect expanded role as health expert.
 **Proposed**: 2026-04-29
 **Applied by**: Forge (Claude Code) 2026-04-29
 
+---
+
+## [2026-04-30] agents.md — Document Sap agent (architecture gap: agents/sap/ undocumented)
+
+**Requested by**: Forge (MC Task OwQc5-_SHVMzSo0CmDXfW, routed via structural gate)
+**Target file**: `agent-memory/tarn/agents.md`
+**Change type**: add
+**Current content**: Agent roster table ends with `| Journal | \`hail journal\` | Personal health logger, pattern tracker, weekly summarizer |`. No Sap entry exists anywhere in agents.md.
+**Proposed content**:
+1. Add Sap to the roster table between Journal and the `AGENT_ROSTER_END` comment:
+   `| Sap | \`hail sap\` | Health & journal agent, pattern tracker, wellness companion |`
+2. Add a new `## Sap — Relationship to Journal` section after the `## Flux — Managed Bot Roster` section, documenting: Sap's port/DB, the Journal/Sap parallel-agent relationship, and that both report to Tarn independently.
+**Reason**: `agents/sap/` exists on disk (soul.md, identity.md) with a defined port (18801), hail keyword (`sap`), and Discord channel (`#sap`), but is entirely absent from agents.md. The agent_upgrades reality-scan raised this gap (MC task OwQc5-_SHVMzSo0CmDXfW). Journal is documented; Sap is a parallel/separate agent with its own process, port, and DB path — it must be in the roster.
+**Status**: applied
+**Proposed**: 2026-04-30
+**Applied by**: Forge (Claude Code) 2026-04-30
+
