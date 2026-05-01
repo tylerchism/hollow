@@ -49,8 +49,9 @@ Conversation history is saved to SQLite and survives restarts. You remember prio
 | Spring | `hail spring` | Creative writing, content, voice-driven output |
 | Reed | `hail reed` | Editorial polish, audience calibration, brief-driven editing |
 | Flux | `hail flux` | Trading strategist, bot architect, and performance monitor |
-| Journal | `hail journal` | Personal health logger, pattern tracker, weekly summarizer |
+| Journal | `hail journal` | Conversational health expert — logs health data, detects trends and anomalies via `analyze_patterns.py`, and grounds patterns in CM corpus nutrient science |
 | Sap | `hail sap` | Health & journal agent, pattern tracker, wellness companion |
+| Bench | `hail bench` / `bin/delegate-to-bench` | Long-task testing executor and delegation validator |
 <!-- AGENT_ROSTER_END -->
 
 ### Agent Invocation Architecture
@@ -212,6 +213,64 @@ System-level infrastructure. No single agent owns ingestion — Tarn monitors he
 
 ---
 
+## DNA / Genomics Infrastructure
+
+**Owner:** Sap (analysis project); Forge (pipeline build)  
+**Project directory:** `~/git/hollow/projects/dna-analysis/`  
+**Status:** Phase 2 complete — trio VCFs parsed, merged, and Mendelian-checked. Annotation (Phase 2 Steps 6–8) and health report (Phase 3) in progress.
+
+### Data
+
+Ancestry V2.0 raw DNA files for the family trio, hg19/GRCh37 build, forward (+) strand:
+
+| Sample | Source file |
+|--------|------------|
+| Tyler | `~/Downloads/dna_extracted/tyler/AncestryDNA.txt` (~677k SNPs) |
+| Mom | `~/Downloads/dna_extracted/mom/mom_AncestryDNA.txt` (~650k SNPs) |
+| Dad | `~/Downloads/dna_extracted/dad/AncestryDNA.txt` (~650k SNPs) |
+
+### Pipeline
+
+`~/projects/dna-analysis/pipeline/` — all working files live here.
+
+| File | Purpose |
+|------|---------|
+| `run_pipeline.sh` | Orchestrates all 8 steps (parse → compress → merge → pedigree → Mendelian → phase → annotate → filter) |
+| `01_parse_to_vcf.py` | Converts Ancestry `.txt` files to VCF via `snps` library |
+| `merged_trio.vcf.gz` | Merged family trio VCF (Steps 1–3 output) |
+| `family.ped` | PLINK pedigree file (FAM001: tyler proband, mom, dad) |
+| `mendelian_check.txt` | bcftools Mendelian consistency results (677,006 OK / 49 errors / 132,949 skipped) |
+| `beagle.27Feb25.75f.jar` | BEAGLE 5.4 — trio phasing (Step 6) |
+| `oc_output/` | OpenCravat annotation output directory (Step 7 — ClinVar, gnomAD, PharmGKB, CADD, SIFT, PolyPhen2) |
+
+### Reference Genome
+
+`~/git/hollow/resources/fasta/GRCh37/` — 25 per-chromosome FASTA files (`Homo_sapiens.GRCh37.dna.chromosome.*.fa.gz`). Used for VCF reference allele validation.
+
+### Toolchain
+
+`snps` (2.9.0, pip), `bcftools` (1.10.2, apt), BEAGLE 5.4 jar, `open-cravat` (3.1.1, pip), SnpSift (Step 8 — not yet installed). All Python tools use `~/git/hollow/.venv`.
+
+### Key Finding (Phase 1 / Preliminary)
+
+Tyler is **homozygous MTHFR C677T** (rs1801133 A/A on forward strand = TT genotype, ~70% reduced enzyme activity). Mom and Dad are both heterozygous carriers. Full health report is Phase 3.
+
+### Phases
+
+| Phase | Status |
+|-------|--------|
+| Phase 1 — Tool research & selection | Complete |
+| Phase 2 — Annotation pipeline (Steps 1–5) | Complete; Steps 6–8 in progress |
+| Phase 3 — Health report | Pending |
+| Phase 4 — Family analysis | Pending |
+| Phase 5 — mtDNA integration | Blocked — waiting on mitome results |
+
+### Routing
+
+DNA analysis questions, variant interpretation, or genomics pipeline work → route to Sap or `hail forge` for pipeline builds. Do not route to Journal unless crossing over into health-pattern analysis using the annotated variants.
+
+---
+
 ## Flux — Managed Bot Roster
 
 All bots are in `~/git/hollow/bots/`. All are currently **paper/shadow mode only** — no live money is moved. Flux owns design, architecture, and performance review for all five.
@@ -247,12 +306,39 @@ Sap (`agents/sap/`) is a parallel health-logging agent distinct from Journal (`a
 | Port | 18798 | 18801 |
 | Database | `data/journal/journal.db` | `data/sap/journal.db` |
 | Discord channel | — | `#sap` |
-| CM corpus retrieval | ✅ (`analyze_patterns.py`, CM expertise) | — |
+| Pattern analysis | ✅ `analyze_patterns.py` (trend, correlation, streak, anomaly) | — |
+| CM corpus retrieval | ✅ `bin/retrieve --person chris-masterjohn` (4,408 chunks) | — |
+| DNA tool access | Genetic data files present; pipeline built (see DNA/Genomics Infrastructure section) | — |
 | Hail | `hail journal` | `hail sap` |
 
 **Inter-agent paths:** None. Both agents report to Tarn independently via HTTP POST to their respective `/ask` endpoints. There is no data sync or cross-agent routing between them.
 
-**When to route to Sap vs. Journal:** Sap is the simpler health companion — low-friction logging, natural language backdating, weekly summaries. Journal has enhanced tooling (CM corpus cross-referencing, `analyze_patterns.py` for trend/correlation/anomaly analysis). Route health queries requiring nutrient-science grounding or statistical pattern analysis to Journal; use Sap for straightforward logging and retrieval.
+**When to route to Sap vs. Journal:** Sap is the simpler health companion — low-friction logging, natural language backdating, weekly summaries. Journal is the conversational health expert: it does the same low-friction logging AND has enhanced tooling (CM corpus cross-referencing for nutrient-science grounding, `analyze_patterns.py` for trend/correlation/anomaly analysis, and DNA variant data available via the genomics pipeline). Route health queries requiring nutrient-science grounding or statistical pattern analysis to Journal; use Sap for straightforward logging and retrieval.
+
+---
+
+## Bench — Relationship to Tarn
+
+Bench (`agents/bench/`) is a generic task executor that exists to stress-test Tarn's long-task delegation infrastructure from the receiving end. It is a separate agent process — not a specialist agent like Tap or Canopy — but a delegation target Tarn uses for testing and validation.
+
+| | Bench |
+|--|-------|
+| Port | 18802 |
+| Database | `data/bench/hollow.db` |
+| Discord channel | `#bench` |
+| Model | claude-sonnet-4-6 |
+| Hail | `hail bench` |
+
+**How Tarn reaches Bench:** Post tasks via `bin/post-to-bench "task description"`. The bin script sends to the `#bench` channel via a webhook (URL stored at `agent-memory/tarn/bench-webhook.txt`). Messages arrive as human input — Bench treats them as task assignments.
+
+**Execution patterns:**
+- **Simple (1–3 tool calls):** Bench handles directly, posts result to `#bench`.
+- **Complex (3+ sequential tool calls):** Bench acknowledges, spawns a background agent, relays result when complete.
+- **Multi-step:** Bench posts a progress update after each major step — does not go silent.
+
+**Routing rule:** Fire-and-done via `bin/delegate-to-bench`. Tarn delegates and moves on; Bench posts results to `#bench`. Tarn does not wait for a synchronous response.
+
+**Purpose:** Bench exists so Tarn can test long-task and background-agent patterns end-to-end without exposing Tyler to rough edges. Bench is also a reference implementation — acknowledge, update, complete — for how all Hollow agents should handle delegated work.
 
 ---
 
