@@ -572,3 +572,83 @@ Also update the opening section to reflect expanded role as health expert.
 **Proposed**: 2026-04-30
 **Applied by**: Forge (Claude Code) 2026-04-30
 
+---
+
+## [2026-04-30] Clarify Bench delegation — stop Tarn subagents from doing Bench's work
+
+**Requested by**: Tarn (root cause fix for double-execution bug)
+**Target file**: `agents/tarn/soul.md`
+**Change type**: add
+**Current content**: N/A (adding new section)
+**Proposed content**: Add this rule to the "Hard Prohibitions" section:
+
+> **Bench delegation is fire-and-done.** When delegating to Bench, call `bin/delegate-to-bench "task"` and STOP. Do not spawn a subagent that does the task work. Do not post progress updates to #bench. Do not call any tools to work on the task yourself. Bench owns execution from the moment it receives the task. Tarn's only job is to fire the task and tell Tyler it's been delegated.
+
+**Reason**: Tarn's subagents were inheriting the soul.md "3+ tool calls → do the work yourself" rule and executing tasks in parallel with Bench, posting interleaved Tarn-authored progress updates to #bench while Bench was also working on the same task.
+**Status**: applied
+**Applied by**: Forge (Claude Code) 2026-04-30
+
+---
+
+## [2026-05-01] crons.json — Add WRITING-EVAL: keyword case to agentmail_inbox_check
+
+**Requested by**: Tyler (Discord, 2026-05-01)
+**Target file**: `agent-memory/tarn/crons.json`
+**Change type**: edit
+**Cron**: `agentmail_inbox_check`
+
+**Current content**: Step 5 has CASE A (SOURCE: prefix) and CASE B (all other messages → #inbox summary).
+
+**Proposed content**: Add CASE C between CASE A and CASE B:
+
+```
+  CASE C — subject starts with "WRITING-EVAL:" (case-insensitive)
+    This case is handled BEFORE CASE B. Emails with this prefix are NOT routed to #inbox.
+
+    a. Extract the full email body/content. This is the paper or article to evaluate.
+    b. Check the body for any extra instructions after the main content (look for lines starting
+       with "INSTRUCTIONS:", "NOTES:", or "EXTRA:" — treat those as directives to follow in addition
+       to the standard eval).
+    c. Pass the content to Spring for structural/cohesion analysis:
+         SPRING_NOTES=$(bin/hail spring "This is a paper/article submitted for writing team evaluation via email. Do NOT rewrite. Do NOT critique voice — this is not Tyler's writing. Analyze ONLY: (1) cohesiveness across sections, (2) argument structure — does the central argument hold together, are there gaps, does each section earn its place? Return notes per section. Keep it clinical.
+
+    PAPER:
+    <body content>")
+
+    d. Pass the content to Tap for logical/evidentiary analysis:
+         TAP_NOTES=$(bin/hail tap "Paper/article submitted for writing team evaluation. Do NOT rewrite. Analyze: (1) Is the central argument logically coherent? (2) Are there structural gaps — missing evidence, argument jumps, sections that don't earn their place? (3) Does the conclusion/reform section follow from the evidentiary setup? Flag specific sections with notes.
+
+    PAPER:
+    <body content>")
+
+    e. Combine into a single evaluation:
+         EVALUATION="WRITING TEAM EVALUATION
+    ========================
+
+    [Spring — Structure & Cohesion]
+    $SPRING_NOTES
+
+    ---
+
+    [Tap — Logic & Evidence]
+    $TAP_NOTES"
+
+       If extra instructions were found in step (b), follow them (e.g. "also note citation style",
+       "focus on Part III", "reply to sender's advisor too").
+
+    f. Send the evaluation back to the original sender via AgentMail:
+         curl -s -X POST "https://api.agentmail.to/v0/inboxes/hollow_tarn@agentmail.to/messages/send" \
+           -H "Authorization: Bearer am_us_inbox_6aa4a7cc9ea652ffa7bffce2a496b2f961a1920f34764029e57bb20a32ac0955" \
+           -H "Content-Type: application/json" \
+           -d "{\"to\": [\"<sender_email>\"], \"subject\": \"Writing Team Notes: <subject without WRITING-EVAL: prefix>\", \"text\": \"$EVALUATION\"}"
+
+    g. Post ONE LINE to #tarn:
+         send_discord_channel tarn "📝 WRITING-EVAL processed: [subject] | sent to [sender]"
+
+    h. Do NOT post to #inbox.
+```
+
+**Reason**: Tyler wants a trigger keyword (`WRITING-EVAL:`) that can be placed in an email subject to automatically route the email content through the writing team (Spring + Tap) for structural/argument analysis. The evaluation is sent back to the original sender. Extra instructions in the email body are followed. These emails should be invisible to other email crons.
+
+**Status**: applied
+**Proposed**: 2026-05-01
