@@ -652,3 +652,40 @@ Also update the opening section to reflect expanded role as health expert.
 
 **Status**: applied
 **Proposed**: 2026-05-01
+
+---
+
+## [2026-05-06] crons.json — Redesign morning brief section (5): tasks → buildable tools/apps
+
+**Requested by**: Tyler (Discord, 2026-05-06)
+**Target file**: `agent-memory/tarn/crons.json`
+**Change type**: edit
+**Cron**: `morning_brief`
+
+**Current content** (section 5 of the morning_brief prompt):
+
+```
+(5) 🛠 WHAT THE TEAM CAN DO FOR TYLER — Generate 2-3 specific things the Hollow team could do autonomously this week to advance Tyler's mission and goals. These are NOT tasks for Tyler to do, and NOT team performance upgrades — they are things Tarn and the specialists can execute on Tyler's behalf. Examples: research a specific event and pull together registration details, find and summarize a key resource on a goal Tyler is pursuing, identify a local community or person worth connecting with, draft an outreach message, scout land listings in the Ozarks matching Tyler's criteria, pull together intel on a topic Tyler cares about. Draw from: land sovereignty / homesteading, ancestral health, community connection, meeting aligned people, growing Hollow's capabilities for Tyler's life. Be specific — not "research homesteading" but "find and summarize the top 3 permaculture land co-op models operating in Arkansas or Missouri right now."
+```
+
+**Proposed content** (replacement for section 5):
+
+```
+(5) 🔨 WHAT THE TEAM CAN BUILD — Generate 2-3 ideas for apps, tools, scripts, or small utilities the Hollow team could build for Tyler. These are NOT task suggestions and NOT team performance upgrades — they are buildable software: a CLI tool, a dashboard, an app, a script suite, an API integration, a workflow. Think creatively. Range across ALL of Tyler's life domains — do NOT cluster around farming or homesteading. Draw from the full breadth of recent team work and Tyler's actual life:
+
+- Health & biochemistry: Sap, Journal, MTHFR homozygous finding, trio DNA pipeline, CM corpus, Vitalis corpus
+- Finance: Flux trading bots (trader2 Kalshi arb, trader-weather, prediction market infrastructure), paper trading, P&L tracking
+- Memory & knowledge: wiki/corpus system, expert knowledge bases, recall/retrieve tools, AgentMail pipeline
+- Content: Spring/Reed pipeline, Substack drafts, article generation, voice calibration
+- Long-task infrastructure: background agents, job channels, task_executor, MC integration
+- Personal: ancestral health, homesteading, land sovereignty, dating/community, conferences, personal development
+- Any other domain Tyler has touched in recent tasks or conversations
+
+Ideas must vary across domains each brief — actively avoid repeating from prior briefs. For each idea: (1) give it a short name, (2) describe it in 1-2 sentences, (3) name the agent(s) who'd own the build, (4) rough size: small = hours to 1 day, medium = 2-3 days, large = 1+ week.
+```
+
+**Reason**: Tyler's feedback (2026-05-06): the current section generates the same farming-related task suggestions repeatedly and doesn't factor in Tyler's interdisciplinary nature or the team's recent work (long-task system, wiki, Sap, DNA analysis, Flux, content pipeline, expert knowledge bases). The redesign shifts from "tasks the team can do" to "things the team can build," and explicitly requires cross-domain range with no clustering.
+
+**Status**: applied
+**Proposed**: 2026-05-06
+**Applied by**: Forge (Claude Code) 2026-05-06
