@@ -689,3 +689,39 @@ Ideas must vary across domains each brief — actively avoid repeating from prio
 **Status**: applied
 **Proposed**: 2026-05-06
 **Applied by**: Forge (Claude Code) 2026-05-06
+
+---
+
+## [2026-05-06] crons.json — morning_brief: send each section as its own Discord message
+
+**Requested by**: Tyler (Discord, 2026-05-06)
+**Target file**: `agent-memory/tarn/crons.json`
+**Change type**: edit
+**Cron**: `morning_brief`
+
+**Problem**: The entire brief is currently returned as a single final response, which the harness posts as one Discord message. Link thumbnails (rich embeds) from one section visually bleed into the next section because Discord renders embeds asynchronously after the message arrives.
+
+**Fix**: Replace the single final-response approach with per-section `send_discord_channel morning-brief "..."` calls — one call per section. Each section arrives as its own Discord message, so embeds from section N can't bleed into section N+1.
+
+**Current closing instruction** (at end of prompt):
+```
+Return the full brief as your final response — the system automatically posts it to #morning-brief. Do NOT call send_msg or send_discord (those go to #tarn). If you want to send an interim status update during the run, use: send_discord_channel morning-brief "Starting morning brief"
+```
+
+**Proposed closing instruction** (replace the above):
+```
+Send each section as its own separate Discord message using send_discord_channel immediately after generating it — do NOT batch them into a single final response. The system does NOT auto-post for this cron; you must send each section yourself. Format:
+
+After generating section (1): send_discord_channel morning-brief "🤖 **AI NEWS**\n<content>"
+After generating section (2): send_discord_channel morning-brief "🎪 **UPCOMING CONFERENCES**\n<content>"  (also cross-post to #events-conferences as before)
+After generating section (3): send_discord_channel morning-brief "💡 **GOAL-ALIGNED IDEAS**\n<content>"  (also cross-post to #ideas as before)
+After generating section (4): send_discord_channel morning-brief "💛 **SOCIAL / DATING**\n<content>"
+After generating section (5): send_discord_channel morning-brief "🔨 **WHAT THE TEAM CAN BUILD**\n<content>"
+
+Do NOT call send_msg or send_discord (those go to #tarn). Return a brief one-line completion note as your final response (e.g. "Morning brief sent — 5 sections.") — this goes to the cron log only.
+```
+
+**Reason**: Per-section sends prevent Discord link thumbnail embeds from one section bleeding into the next section visually. Each message is self-contained so embeds attach to the correct section.
+**Status**: applied
+**Proposed**: 2026-05-06
+**Applied by**: Forge (Claude Code) 2026-05-06

@@ -713,6 +713,7 @@ def setup_scheduler(
             continue
 
         _gate_command = job_def.get("gate_command", "")
+        _split_sections_flag = job_def.get("split_sections", False)
 
         async def cron_handler(
             _name=name,
@@ -722,6 +723,7 @@ def setup_scheduler(
             _notify_discord=notify_discord,
             _discord_channel_name=discord_channel_name,
             _gate=_gate_command,
+            _split_sections=_split_sections_flag,
         ):
             log.info("Cron job '%s' firing", _name)
             try:
@@ -774,12 +776,33 @@ def setup_scheduler(
                         _notify_discord or _discord_channel_name
                     ):
                         if _discord_channel_name:
+                            # Split into per-section chunks if requested
+                            if _split_sections:
+                                _section_emojis = ('🤖', '🎪', '💡', '💛', '🔨')
+                                lines = result.split('\n')
+                                chunks: list[str] = []
+                                current: list[str] = []
+                                for line in lines:
+                                    stripped = line.lstrip()
+                                    if stripped and any(stripped.startswith(e) for e in _section_emojis) and current:
+                                        chunks.append('\n'.join(current))
+                                        current = [line]
+                                    else:
+                                        current.append(line)
+                                if current:
+                                    chunks.append('\n'.join(current))
+                                chunks = [c for c in chunks if c.strip()]
+                                if not chunks:
+                                    chunks = [result]
+                            else:
+                                chunks = [result]
                             sent_any = False
-                            for guild in discord_bot._client.guilds:
-                                sent = await discord_bot.send_to_named_channel(
-                                    guild, _discord_channel_name, result
-                                )
-                                sent_any = sent_any or sent
+                            for chunk in chunks:
+                                for guild in discord_bot._client.guilds:
+                                    sent = await discord_bot.send_to_named_channel(
+                                        guild, _discord_channel_name, chunk
+                                    )
+                                    sent_any = sent_any or sent
                             if not sent_any:
                                 log.warning(
                                     "Cron '%s': Discord channel '#%s' not found on any guild",
