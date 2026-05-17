@@ -756,3 +756,80 @@ Return the full brief as your final response. The harness will automatically spl
 **Status**: applied
 **Proposed**: 2026-05-08
 **Applied by**: Forge (Claude Code) 2026-05-08
+
+---
+
+## [2026-05-09] agents.md — document split_sections harness feature
+
+**Requested by**: Structural gate auto-task (MC task zY8FL1kkWDd-4Pg0ZYg0S)
+**Target file**: `agent-memory/tarn/agents.md`
+**Change type**: edit — expand Scheduled Jobs section
+**MC task reference**: nN9xBR2h_IBqlikhGnUeH introduced `split_sections` to main.py and crons.json; agents.md was not updated
+
+**Problem**: The harness gained a new cron field (`split_sections`) that controls post-processing of cron output. This behavior is not documented in agents.md. Without documentation, future cron authors have no way to know the feature exists.
+
+**What split_sections does** (from src/main.py ~line 780):
+- A boolean field on a cron definition in crons.json (default: false)
+- When `true`: after the LLM returns its final response, the harness splits it on lines starting with any of these emojis: `🤖 🎪 💡 💛 🔨`
+- Each matching line opens a new chunk; each chunk is posted as a separate `send_to_named_channel` call
+- Falls back to a single message if no section-header emoji lines are found
+
+**Fix**: Expand the Scheduled Jobs paragraph (line 23 of agents.md) to note cron field capabilities including `split_sections`.
+
+**Current text (line 23)**:
+```
+APScheduler crons run as a persistent daemon inside this process — they do NOT die with the session. Defined in ~/git/hollow/agent-memory/tarn/crons.json. Currently running: morning_brief, ideas_review, backlog_triage, task_executor, team_retro.
+```
+
+**Proposed replacement**:
+```
+APScheduler crons run as a persistent daemon inside this process — they do NOT die with the session. Defined in ~/git/hollow/agent-memory/tarn/crons.json. Currently running: morning_brief, ideas_review, backlog_triage, task_executor, team_retro.
+
+**Cron field: `split_sections`** (bool, default false) — when true, the harness splits the LLM's final response on lines starting with `🤖`, `🎪`, `💡`, `💛`, or `🔨` and posts each chunk as a separate Discord message. Falls back to one message if no emoji headers are found. Currently enabled on: `morning_brief`.
+```
+
+**Status**: applied
+**Proposed**: 2026-05-09
+**Applied by**: Forge (Claude Code) 2026-05-09
+
+---
+
+## agents.md — Agent Invocation Architecture: close .claude/agents/ migration
+
+**MC task**: kbv_MMlpJy1fMer5w2nOd
+**File**: `agent-memory/tarn/agents.md`, lines 59–64 (`### Agent Invocation Architecture` section)
+**Proposed by**: Forge (Claude Code) 2026-05-17
+
+**Context**: The `.claude/agents/` native format migration has been open 50+ days with no progress. Assessment is: formally close. Rationale:
+
+1. **Architectural incompatibility**: Hollow agents are long-running HTTP services with persistent SQLite history, Discord integration, and cron jobs. The `.claude/agents/` native format defines stateless, ephemeral Claude Code subagents — a fundamentally different runtime model that cannot support these capabilities.
+2. **`hail` already delivers the key value**: Model routing (`--model`), context injection (`--context`), worktree isolation (`--worktree`), async dispatch (`--detach`). The main reasons to migrate — routing control and isolation — are already implemented in `hail`.
+3. **Prior design intent**: system-redesign-proposal.md explicitly placed this in "Phase 5: Not scheduled" with a decision gate after Phase 3. That gate is now reached; the evaluation answer is: not worth it. The HTTP server + `hail` model has continued to work well.
+4. **No operational pressure**: 50+ days of gap, no user requests, no pain from its absence.
+
+The current `### Agent Invocation Architecture` section contains misleading text implying `.claude/agents/` is a planned or active invocation path. Replace it with accurate architecture documentation.
+
+**Current text (lines 59–64)**:
+```
+### Agent Invocation Architecture
+
+- The `.claude/agents/` directory holds native Claude Code subagent definitions; these can be invoked directly by the Claude Code runtime without going through `hail`.
+- `hail` CLI is retained as the standard delegation mechanism for cross-agent calls from shell scripts, cron jobs, and Tarn's own routing logic.
+- The agent roster table above remains the source of truth for agent roles and responsibilities.
+- Both invocation paths (`.claude/agents/` native and `hail`) use the same underlying agent identity files; they are complementary, not competing.
+```
+
+**Proposed replacement**:
+```
+### Agent Invocation Architecture
+
+`hail` is the **sole invocation path** for cross-agent delegation. It routes tasks to each agent's HTTP server via POST. Agents run as persistent processes; `hail` supports model override (`--model`), context injection (`--context`), worktree isolation (`--worktree`), and async dispatch (`--detach`).
+
+The `.claude/agents/` native format migration was assessed and formally closed 2026-05-17. Rationale: Hollow agents are stateful HTTP services with persistent SQLite history, cron jobs, and Discord integration — the `.claude/agents/` format defines ephemeral stateless subagents, an incompatible runtime model. `hail` already provides the routing, isolation, and model-selection value that migration would have added.
+
+The agent roster table above remains the source of truth for agent roles and responsibilities.
+```
+
+**Status**: applied
+**Proposed**: 2026-05-17
+**Applied by**: Forge (Claude Code) 2026-05-17

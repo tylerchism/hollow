@@ -22,6 +22,8 @@
 ### Scheduled Jobs
 APScheduler crons run as a persistent daemon inside this process — they do NOT die with the session. Defined in ~/git/hollow/agent-memory/tarn/crons.json. Currently running: morning_brief, ideas_review, backlog_triage, task_executor, team_retro.
 
+**Cron field: `split_sections`** (bool, default false) — when true, the harness splits the LLM's final response on lines starting with `🤖`, `🎪`, `💡`, `💛`, or `🔨` and posts each chunk as a separate Discord message. Falls back to one message if no emoji headers are found. Currently enabled on: `morning_brief`.
+
 ### Persistent Memory
 Conversation history is saved to SQLite and survives restarts. You remember prior sessions per chat_id.
 
@@ -56,10 +58,11 @@ Conversation history is saved to SQLite and survives restarts. You remember prio
 
 ### Agent Invocation Architecture
 
-- The `.claude/agents/` directory holds native Claude Code subagent definitions; these can be invoked directly by the Claude Code runtime without going through `hail`.
-- `hail` CLI is retained as the standard delegation mechanism for cross-agent calls from shell scripts, cron jobs, and Tarn's own routing logic.
-- The agent roster table above remains the source of truth for agent roles and responsibilities.
-- Both invocation paths (`.claude/agents/` native and `hail`) use the same underlying agent identity files; they are complementary, not competing.
+`hail` is the **sole invocation path** for cross-agent delegation. It routes tasks to each agent's HTTP server via POST. Agents run as persistent processes; `hail` supports model override (`--model`), context injection (`--context`), worktree isolation (`--worktree`), and async dispatch (`--detach`).
+
+The `.claude/agents/` native format migration was assessed and formally closed 2026-05-17. Rationale: Hollow agents are stateful HTTP services with persistent SQLite history, cron jobs, and Discord integration — the `.claude/agents/` format defines ephemeral stateless subagents, an incompatible runtime model. `hail` already provides the routing, isolation, and model-selection value that migration would have added.
+
+The agent roster table above remains the source of truth for agent roles and responsibilities.
 
 ## Mission Control
 Tyler's task/idea board at http://localhost:3333. Use `mc` CLI for all operations. API key is embedded in the script.
