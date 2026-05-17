@@ -725,3 +725,34 @@ Do NOT call send_msg or send_discord (those go to #tarn). Return a brief one-lin
 **Status**: applied
 **Proposed**: 2026-05-06
 **Applied by**: Forge (Claude Code) 2026-05-06
+
+---
+
+## [2026-05-08] crons.json — morning_brief: add split_sections: true
+
+**Requested by**: Tyler (Discord, 2026-05-08)
+**Target file**: `agent-memory/tarn/crons.json`
+**Change type**: edit (one field added)
+**Cron**: `morning_brief`
+
+**Problem**: The harness-level `split_sections` feature was built in commit c75e63e (src/main.py), but the `"split_sections": true` flag was never actually added to the morning_brief cron entry in crons.json. As a result, the harness still posts the entire brief as a single Discord message.
+
+**Fix**: Add `"split_sections": true` to the morning_brief cron object in crons.json.
+
+Find the morning_brief entry and add the field alongside the existing fields:
+```json
+"split_sections": true,
+```
+
+This field should be placed near the end of the morning_brief object, before the closing `}`. The harness will then split the LLM's final response on lines starting with 🤖 🎪 💡 💛 🔨 and post each chunk as a separate Discord message.
+
+**Also clean up the prompt**: The current prompt contains verbose per-section `send_discord_channel` instructions that were the failed workaround. Replace the closing instructions block (from "Send each section as its own separate Discord message..." to "...goes to the cron log only.") with:
+
+```
+Return the full brief as your final response. The harness will automatically split it into per-section Discord messages. Do NOT call send_discord_channel, send_msg, or send_discord for the main sections — the harness handles delivery. Exception: still cross-post to #events-conferences and #ideas using send_discord_channel for those two sections as instructed above.
+```
+
+**Reason**: The LLM cannot reliably call `send_discord_channel` mid-response from a cron context — it always returns a single final response. The harness `split_sections` feature is the correct fix and just needs the flag enabled.
+**Status**: applied
+**Proposed**: 2026-05-08
+**Applied by**: Forge (Claude Code) 2026-05-08

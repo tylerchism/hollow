@@ -42,8 +42,11 @@ LOCK_FILE     = Path("/tmp/hollow-watchdog.lock")
 
 HEALTH_TIMEOUT  = 5       # seconds per agent health check
 COOLDOWN_MINUTES = 15     # don't re-alert same agent within this window
+STALE_ALERT_COOLDOWN_SECONDS = 3600  # don't re-alert same stale task within 1 hour
 # Discord channel name to send watchdog alerts to (must match a real channel name)
 DISCORD_ALERT_CHANNEL = "tarn"
+# Bots whose disconnection is treated as a restart-worthy condition (same as fully down)
+CRITICAL_BOTS = {"discord"}
 # Maximum age (seconds) of a stale lock before we override it.
 # This should exceed the worst-case single-run time (9 agents × 5s timeout + 15s restart wait).
 LOCK_MAX_AGE_SEC = 180
@@ -416,7 +419,7 @@ def reset_stale_leases(cfg: dict) -> int:
     return reset_count
 
 
-def check_stale_inprogress(discord_token: Optional[str]) -> int:
+def check_stale_inprogress(discord_token: Optional[str], state: dict) -> int:
     """
     Detect tasks stuck in in_progress with no recent activity.
 
@@ -427,7 +430,10 @@ def check_stale_inprogress(discord_token: Optional[str]) -> int:
     Detection only — no status changes. Posts a ⚠️ STALE IN-PROGRESS alert to
     Discord #tasks for each stale task found.
 
-    Returns the count of stale tasks detected.
+    Rate-limited: the same task will not generate more than one alert per hour.
+    Alert timestamps are stored in state under the key "stale_task:<task_id>".
+
+    Returns the count of stale tasks that generated a new alert this run.
     """
     STALE_HOURS = 72  # 3 days
 
@@ -496,7 +502,18 @@ def check_stale_inprogress(discord_token: Optional[str]) -> int:
 
     log(f"  stale-inprogress: {len(stale)} stale task(s) found")
 
+    alerted = 0
     for s in stale:
+        state_key = f"stale_task:{s['id']}"
+        last_alerted = state.get(state_key, {}).get("last_alert_ts")
+        if last_alerted and (time.time() - last_alerted) < STALE_ALERT_COOLDOWN_SECONDS:
+            log(
+                f"  stale-inprogress: {s['id']} — {s['title'][:60]} — "
+                f"suppressed (alerted {int((time.time() - last_alerted) / 60)}m ago, "
+                f"cooldown={STALE_ALERT_COOLDOWN_SECONDS // 60}m)"
+            )
+            continue
+
         alert = (
             f"\u26a0\ufe0f STALE IN-PROGRESS: {s['title']}\n"
             f"  task id: {s['id']}\n"
@@ -531,8 +548,11 @@ def check_stale_inprogress(discord_token: Optional[str]) -> int:
             },
         )
 
-    return len(stale)
+        # Record alert timestamp so we don't re-fire within the cooldown window
+        state.setdefault(state_key, {})["last_alert_ts"] = time.time()
+        alerted += 1
 
+    return alerted
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 
@@ -618,7 +638,7 @@ def _main(args) -> None:
     # Alert on tasks stuck in in_progress with no heartbeat activity for 3+ days.
     # Detection only — does not modify any task status.
     log("Checking for stale in-progress tasks...")
-    check_stale_inprogress(discord_token)
+    check_stale_inprogress(discord_token, state)
 
     # Build agent list from config
     agents = [{"name": cfg["coordinator"]["name"], "port": cfg["coordinator"]["port"]}]
@@ -657,16 +677,31 @@ def _main(args) -> None:
         healthy, detail, bots = ping_agent(name, port)
 
         if healthy:
-            up.append(name)
-            bot_info = ""
-            if bots:
-                deaf = [b for b, ok in bots.items() if not ok]
-                if deaf:
-                    bot_info = f" (bots deaf: {', '.join(deaf)})"
-            log(f"  ✓ {name}:{port}{bot_info}")
-            # Clear any previous down state
-            if name in state:
-                state[name]["down"] = False
+            deaf_critical = [b for b in CRITICAL_BOTS if bots.get(b) is False]
+            deaf_all = [b for b, ok in bots.items() if not ok]
+
+            if deaf_critical:
+                # Process is alive but a critical bot is disconnected — treat as restart-worthy
+                detail_degraded = f"degraded (bots deaf: {', '.join(deaf_all)})"
+                log(f"  ✗ {name}:{port} — {detail_degraded}")
+
+                if args.restart:
+                    restarted = try_restart(name, port, discord_token=discord_token)
+                    if restarted:
+                        fixed.append(name)
+                        if name in state:
+                            state[name]["down"] = False
+                        continue  # don't alert if we fixed it
+
+                down.append({"name": name, "port": port, "detail": detail_degraded})
+                state.setdefault(name, {})["down"] = True
+            else:
+                up.append(name)
+                bot_info = f" (bots deaf: {', '.join(deaf_all)})" if deaf_all else ""
+                log(f"  ✓ {name}:{port}{bot_info}")
+                # Clear any previous down state
+                if name in state:
+                    state[name]["down"] = False
         else:
             log(f"  ✗ {name}:{port} — {detail}")
 
