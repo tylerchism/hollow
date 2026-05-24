@@ -833,3 +833,66 @@ The agent roster table above remains the source of truth for agent roles and res
 **Status**: applied
 **Proposed**: 2026-05-17
 **Applied by**: Forge (Claude Code) 2026-05-17
+
+---
+
+## [2026-05-23] crons.json — agent_upgrades MIGRATION CHECK: add closed-initiatives suppression
+
+**Requested by**: tarn (MC task 7xCDe4OULUB4Szs5BUCk2)
+**Target file**: `agent-memory/tarn/crons.json`
+**Change type**: edit
+**Cron**: `agent_upgrades`
+**Status**: pending
+**Date**: 2026-05-23
+
+**Problem**: The MIGRATION CHECK section of the `agent_upgrades` cron has been auto-generating ".claude/agents/ migration incomplete" tasks repeatedly since this initiative was permanently closed on 2026-05-17. The cron has no memory of closed initiatives and regenerates the task every run (4 times in 6 days). Each instance is closed by task_executor, wasting compute and polluting the activity log.
+
+**Fix**: Modify the MIGRATION CHECK section of the `agent_upgrades` cron to read `agent-memory/tarn/closed-initiatives.txt` at the start of the check and skip task creation if the would-be task title matches any entry in that file.
+
+Specifically, before the `mc tasks create` call for any migration gap task, add a check:
+
+```bash
+# Read closed-initiatives suppression list
+CLOSED_INITIATIVES_FILE="$(dirname "$0")/../agent-memory/tarn/closed-initiatives.txt"
+if [ -f "$CLOSED_INITIATIVES_FILE" ]; then
+  while IFS= read -r line; do
+    # Skip blank lines and comments
+    [[ -z "$line" || "$line" == \#* ]] && continue
+    # Case-insensitive match against proposed task title
+    if echo "$PROPOSED_TITLE" | grep -qi "$line"; then
+      echo "suppressed (closed initiative: $line)" >> "$LOG"
+      continue 2  # skip to next gap check
+    fi
+  done < "$CLOSED_INITIATIVES_FILE"
+fi
+```
+
+The suppression check must run before any `mc tasks create` call in the MIGRATION CHECK. If any non-comment line in `closed-initiatives.txt` (stripped, case-insensitive) is found in the proposed task title, log "suppressed (closed initiative: [line])" and skip creation for that task.
+
+**Why a file**: `closed-initiatives.txt` acts as a persistent memory list that can be extended without modifying the gated crons.json. New closed initiatives can be added to the file by any agent with write access to agent-memory/tarn/ without requiring another structural gate change.
+
+**First entry already in place**: `agent-memory/tarn/closed-initiatives.txt` has been created with the `.claude/agents/ migration` entry (closed 2026-05-17).
+
+---
+
+## [2026-05-24] agents.md — document architecture-gap suppression list (closed-initiatives.txt)
+
+**Requested by**: tarn (MC task ZlxJa3WuWweKpc7cdaZYn)
+**Target file**: `agent-memory/tarn/agents.md`
+**Change type**: addition
+**Section**: Scheduled Jobs — new subsection after `split_sections` field note
+**Status**: applied
+**Applied by**: Forge (Claude Code) 2026-05-24
+**Date**: 2026-05-24
+
+**What**: Document the architecture-gap check suppression mechanism introduced by task 7xCDe4OULUB4Szs5BUCk2.
+
+**Proposed addition** (insert after the `split_sections` field note, before `### Persistent Memory`):
+
+```
+**Architecture-Gap Check suppression list** — `agent-memory/tarn/closed-initiatives.txt`. The `agent_upgrades` cron (step 6, MIGRATION CHECK) reads this file before creating any migration-gap task. If any non-comment line in the file matches the proposed task title (case-insensitive), the cron logs "suppressed (closed initiative: [line])" and skips creation. This prevents permanently-closed initiatives from being re-queued on every cron run.
+
+**To suppress a future initiative:** add one keyword or phrase per line to `closed-initiatives.txt`. Comment lines start with `#`. No structural gate required — the file is not gated. Current entries: `.claude/agents/ migration` (closed 2026-05-17).
+```
+
+**Why**: Without this doc, future agents won't know the file exists, won't know how to extend it, and will be confused when architecture-gap tasks stop appearing for closed initiatives.

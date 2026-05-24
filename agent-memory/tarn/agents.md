@@ -24,6 +24,10 @@ APScheduler crons run as a persistent daemon inside this process — they do NOT
 
 **Cron field: `split_sections`** (bool, default false) — when true, the harness splits the LLM's final response on lines starting with `🤖`, `🎪`, `💡`, `💛`, or `🔨` and posts each chunk as a separate Discord message. Falls back to one message if no emoji headers are found. Currently enabled on: `morning_brief`.
 
+**Architecture-Gap Check suppression list** — `agent-memory/tarn/closed-initiatives.txt`. The `agent_upgrades` cron (step 6, MIGRATION CHECK) reads this file before creating any migration-gap task. If any non-comment line in the file matches the proposed task title (case-insensitive), the cron logs "suppressed (closed initiative: [line])" and skips creation. This prevents permanently-closed initiatives from being re-queued on every cron run.
+
+**To suppress a future initiative:** add one keyword or phrase per line to `closed-initiatives.txt`. Comment lines start with `#`. No structural gate required — the file is not gated. Current entries: `.claude/agents/ migration` (closed 2026-05-17).
+
 ### Persistent Memory
 Conversation history is saved to SQLite and survives restarts. You remember prior sessions per chat_id.
 
