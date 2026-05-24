@@ -896,3 +896,45 @@ The suppression check must run before any `mc tasks create` call in the MIGRATIO
 ```
 
 **Why**: Without this doc, future agents won't know the file exists, won't know how to extend it, and will be confused when architecture-gap tasks stop appearing for closed initiatives.
+
+---
+
+## [2026-05-24] agents.md — document watchdog stale alert: tyler-owned bypass + 6h cooldown
+
+**Requested by**: tarn (MC task xSVGgs7bzxwKXzQP-siUW)
+**Target file**: `agent-memory/tarn/agents.md`
+**Change type**: addition
+**Section**: new `## Watchdog` section between `## Self-Restart` and `## Corpus Ingestion Pipeline`
+**Status**: applied
+**Applied by**: Forge (Claude Code) 2026-05-24
+**Date**: 2026-05-24
+
+**What**: Document two watchdog stale alert behavior changes introduced by task s75F5KoMJIEJfCYTQOkQe:
+1. `tyler-owned` tag now suppresses stale alerts entirely for a task
+2. Stale alert cooldown changed from 1h to 6h (~22 → ~4 alerts/day)
+
+**Proposed addition** (new `## Watchdog` section, insert before `## Corpus Ingestion Pipeline`):
+
+```
+## Watchdog
+
+`bin/watchdog` — persistent background process that monitors agent health and task staleness. Runs sweeps every 5 minutes. Alerts to Discord #tasks and logs to MC activity.
+
+### Stale In-Progress Alert Behavior
+
+Alerts when a task has been `in_progress` for too long with no heartbeat activity.
+
+**Cooldown:** 6 hours between repeated alerts for the same task (constant: `STALE_ALERT_COOLDOWN_SECONDS = 21600`). A task stuck in progress for days generates at most ~4 alerts/day, not ~288.
+
+**tyler-owned bypass:** Tasks tagged `tyler-owned` are **exempt from stale alerts entirely**. The watchdog logs `suppressed (tyler-owned tag)` and skips without posting to Discord or MC activity.
+
+**When to use `tyler-owned`:** Tag a task with `tyler-owned` when Tyler is personally running it (long-running manual work, multi-day personal projects, tasks intentionally left in-progress). This silences watchdog noise for work Tyler owns and is actively managing.
+
+```bash
+mc tasks update <id> --tags tyler-owned
+```
+
+**`--once` flag:** `watchdog --once` bypasses the cooldown for that single sweep — forces an alert even if the task was recently alerted. Useful for manual health checks.
+```
+
+**Why**: Without this doc, future agents and Tyler won't know about the tyler-owned bypass, won't know the cooldown is 6h (not 1h as originally set), and won't know how to silence watchdog alerts for long-running personal work.

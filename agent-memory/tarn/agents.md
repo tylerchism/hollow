@@ -178,6 +178,28 @@ Restart takes ~10–15s. Startup notification signals new process is live.
 
 ---
 
+## Watchdog
+
+`bin/watchdog` — persistent background process that monitors agent health and task staleness. Runs sweeps every 5 minutes. Alerts to Discord #tasks and logs to MC activity.
+
+### Stale In-Progress Alert Behavior
+
+Alerts when a task has been `in_progress` for too long with no heartbeat activity.
+
+**Cooldown:** 6 hours between repeated alerts for the same task (constant: `STALE_ALERT_COOLDOWN_SECONDS = 21600`). A task stuck in progress for days generates at most ~4 alerts/day, not ~288.
+
+**tyler-owned bypass:** Tasks tagged `tyler-owned` are **exempt from stale alerts entirely**. The watchdog logs `suppressed (tyler-owned tag)` and skips without posting to Discord or MC activity.
+
+**When to use `tyler-owned`:** Tag a task with `tyler-owned` when Tyler is personally running it (long-running manual work, multi-day personal projects, tasks intentionally left in-progress). This silences watchdog noise for work Tyler owns and is actively managing.
+
+```bash
+mc tasks update <id> --tags tyler-owned
+```
+
+**`--once` flag:** `watchdog --once` bypasses the cooldown for that single sweep — forces an alert even if the task was recently alerted. Useful for manual health checks.
+
+---
+
 ## Corpus Ingestion Pipeline
 
 An external integration layer that populates the knowledge corpus used by `bin/recall` and `bin/retrieve`. Managed via cron; not invoked interactively by Tarn in normal operation.
