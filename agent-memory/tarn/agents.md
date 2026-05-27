@@ -210,6 +210,7 @@ An external integration layer that populates the knowledge corpus used by `bin/r
 - **bin/ingest-corpus** — Per-person CLI: accepts RSS feeds, transcript files, blog posts, or YouTube metadata for a named person slug.
 - **bin/ingest-vitalis** — Daniel Vitalis full pipeline: fetches Rewild Yourself RSS → downloads audio via yt-dlp → transcribes via WhisperX → calls bin/ingest.
 - **bin/ingest-masterjohn** — Chris Masterjohn: reads `wiki/raw/*chrismasterjohnphd*.md` files (written by bin/substack-fetcher) → calls bin/ingest.
+- **bin/ingest-weinstein** — Bret Weinstein DarkHorse full pipeline: reads pre-fetched raw corpus files from `~/data/corpus/bret-weinstein/raw/` → downloads audio via yt-dlp (fallback: direct fetch) → transcribes via WhisperX large-v3 → calls `bin/ingest --person bret-weinstein`. Default filter: 2023+ episodes. Corpus DB: `~/data/corpus/bret-weinstein/memory.db`. Progress posted to `#job-weinstein-transcripts` Discord channel. Run manually (not cron-scheduled) due to large batch size. Key flags: `--all` (all 455 episodes), `--episodes N` (limit), `--dry-run`, `--skip-ingest`.
 - **bin/ingest-sources** — Reads the #sources Discord channel, fetches URL content, writes to `wiki/raw/`, and routes DV/CM/BW content to their per-person corpus DBs via bin/ingest-corpus.
 - **bin/substack-fetcher** — Fetches full-content posts from paid Substack subscriptions (SUBSTACK_SID from .env) → writes to `wiki/raw/YYYY-MM-DD-{slug}.md`. State file: `agent-memory/tarn/substack-state.json`.
 - **bin/check-corpus-health** — Monitors all `~/data/corpus/` DBs for staleness, missing chunks, and ingest errors. Alerts to Discord on degraded status.
@@ -224,8 +225,8 @@ An external integration layer that populates the knowledge corpus used by `bin/r
 
 - **Substack API** — SUBSTACK_SID cookie (`agents/tarn/.env`); required by bin/substack-fetcher
 - **Discord bot token** — DISCORD_BOT_TOKEN (`agents/tarn/.env`); required by bin/ingest-sources to read #sources channel
-- **yt-dlp** — local binary; required by bin/ingest-vitalis for audio download
-- **WhisperX** — local model; required by bin/ingest-vitalis for transcription
+- **yt-dlp** — local binary; required by bin/ingest-vitalis and bin/ingest-weinstein for audio download
+- **WhisperX** — local model; required by bin/ingest-vitalis and bin/ingest-weinstein for transcription
 - **Libsyn RSS** — public feed at `feeds.libsyn.com/rewild-yourself/rss`; fetched by bin/ingest-vitalis
 
 ### Cron Schedule

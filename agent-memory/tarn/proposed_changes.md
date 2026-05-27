@@ -938,3 +938,24 @@ mc tasks update <id> --tags tyler-owned
 ```
 
 **Why**: Without this doc, future agents and Tyler won't know about the tyler-owned bypass, won't know the cooldown is 6h (not 1h as originally set), and won't know how to silence watchdog alerts for long-running personal work.
+
+---
+
+**Date**: 2026-05-27
+**Task**: 7yfuaF4CDipc4m_K_Rab4 (Architecture review: bin/ingest-weinstein)
+**Status**: applied (Forge, 2026-05-27)
+**File**: agents/tarn/agents.md → Corpus Ingestion Pipeline section
+
+**What**: Document `bin/ingest-weinstein` introduced by task x-23iZw6wL_MgTWoW7Yst.
+
+**Proposed addition** (Scripts list, after `bin/ingest-masterjohn` line):
+
+```
+- **bin/ingest-weinstein** — Bret Weinstein DarkHorse full pipeline: reads pre-fetched raw corpus files from `~/data/corpus/bret-weinstein/raw/` → downloads audio via yt-dlp (fallback: direct fetch) → transcribes via WhisperX large-v3 → calls `bin/ingest --person bret-weinstein`. Default filter: 2023+ episodes. Corpus DB: `~/data/corpus/bret-weinstein/memory.db`. Progress posted to `#job-weinstein-transcripts` Discord channel. Run manually (not cron-scheduled) due to large batch size. Key flags: `--all` (all 455 episodes), `--episodes N` (limit), `--dry-run`, `--skip-ingest`.
+```
+
+**Proposed update** (External Dependencies, yt-dlp and WhisperX lines — note ingest-weinstein also uses them):
+- Change: `required by bin/ingest-vitalis for audio download` → `required by bin/ingest-vitalis and bin/ingest-weinstein for audio download`
+- Change: `required by bin/ingest-vitalis for transcription` → `required by bin/ingest-vitalis and bin/ingest-weinstein for transcription`
+
+**Why**: ingest-weinstein builds BW corpus (a tracked entity in the knowledge graph) and follows the same pipeline pattern as ingest-vitalis. Without this doc, agents won't know it exists, won't know the `#job-weinstein-transcripts` channel, and won't know it's manual-only (no cron).
