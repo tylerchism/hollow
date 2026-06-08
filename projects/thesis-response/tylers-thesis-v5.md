@@ -681,6 +681,7 @@ The autopoietic loop Michael identifies is real. The way to break it is to stop 
 
 - Chris Masterjohn: "Secrets to Superior Cognitive Performance (Without Drugs)" (2023): https://www.youtube.com/watch?v=5Qt4ak1Je9s
 - NYT article on industrial food (piece being critiqued): https://www.nytimes.com/2026/02/08/opinion/food-industrial-local-organic.html
+- Response to the NYT piece on industrial food (written in the voice of Chris Masterjohn): https://tylerchism.github.io/pages/nyt-food-critique.html
 - DarkHorse Podcast (Bret Weinstein): https://www.youtube.com/@BretWeinsteinDH
 - Daniel Vitalis / Arthur Haines conversation: https://danielvitalis.com/rewild-yourself-podcast/why-im-a-conscientious-omnivore-daniel-vitalis-arthur-haines-100 (Episode #100: "Why I'm a Conscientious Omnivore")
 - Robert Murphy & Jordan Peterson, EP189 "Is Property Theft?" (2021): https://www.youtube.com/watch?v=_OtZ49i-yyk
